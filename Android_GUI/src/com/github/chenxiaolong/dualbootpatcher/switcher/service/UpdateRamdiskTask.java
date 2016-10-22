@@ -154,38 +154,7 @@ public final class UpdateRamdiskTask extends BaseServiceTask {
 
     private UsesExfat voldUsesFuseExfat(MbtoolInterface iface)
             throws IOException, MbtoolException {
-        // Only do this for the current ROM since we might not have access to the files of other
-        // ROMs (eg. if the ROM uses a system image)
-        File tempVold = new File(getContext().getCacheDir() + "/vold");
-        tempVold.delete();
-
-        try {
-            RomInformation currentRom = RomUtils.getCurrentRom(getContext(), iface);
-            if (currentRom != null && currentRom.getId().equals(mRomInfo.getId())) {
-                iface.pathCopy("/system/bin/vold", tempVold.getAbsolutePath());
-                iface.pathChmod(tempVold.getAbsolutePath(), 0644);
-
-                // Set SELinux context
-                try {
-                    String label = iface.pathSelinuxGetLabel(tempVold.getParent(), false);
-                    iface.pathSelinuxSetLabel(tempVold.getAbsolutePath(), label, false);
-                } catch (MbtoolCommandException e) {
-                    Log.w(TAG, "Failed to set SELinux label of temp vold copy", e);
-                }
-
-                IntByReference result = new IntByReference();
-                if (LibMiscStuff.INSTANCE.find_string_in_file(
-                        tempVold.getAbsolutePath(), "/system/bin/mount.exfat", result)) {
-                    return result.getValue() != 0 ? UsesExfat.YES : UsesExfat.NO;
-                }
-            }
-        } catch (MbtoolCommandException e) {
-            Log.e(TAG, "Failed to determine if vold uses fuse-exfat", e);
-        } finally {
-            tempVold.delete();
-        }
-
-        return UsesExfat.UNKNOWN;
+        return UsesExfat.YES;
     }
 
     private boolean repatchBootImage(MbtoolInterface iface, File file, int wasType,
