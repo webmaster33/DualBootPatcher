@@ -1228,6 +1228,107 @@ static void run_adb()
 }
 #endif
 
+template<typename Func>
+bool retry(unsigned int attempts, const char *msg, Func f)
+{
+    for (unsigned int i = 0; i < attempts; ++i) {
+        LOGE("[Attempt %u/%u] %s", i + 1, attempts + 1, msg);
+        if (f()) {
+            LOGE("[Succeeded] %s", msg);
+            return true;
+        } else {
+            LOGE("[Failed, sleeping 1 second] %s", msg);
+            sleep(1);
+        }
+    }
+    LOGE("[All attempts failed] %s", msg);
+    return false;
+}
+
+static bool note_3_hack()
+{
+    if (!retry(15, "Create /note3cache directory", [&]{
+        if (mkdir("/note3cache", 0700) < 0) {
+            LOGE("%s: Failed to create directory: %s",
+                 "/note3cache", strerror(errno));
+            return false;
+        }
+        return true;
+    })) {
+        return false;
+    }
+
+    if (!retry(15, "Mount /cache in /note3cache", [&]{
+        if (mount("/dev/block/platform/msm_sdcc.1/by-name/cache", "/note3cache",
+                  "ext4", 0, "") < 0) {
+            LOGE("%s: Failed to mount cache partition: %s",
+                 "/note3cache", strerror(errno));
+            return false;
+        }
+        return true;
+    })) {
+        return false;
+    }
+
+    LOGE("Starting kmsg dump");
+
+    int fd_kmsg = open("/proc/kmsg", O_RDONLY);
+    if (fd_kmsg < 0) {
+        LOGE("%s: Failed to open file: %s", "/proc/kmsg", strerror(errno));
+        return false;
+    }
+
+    auto close_kmsg_fd = util::finally([&]{
+        close(fd_kmsg);
+    });
+
+    int fd = open("/note3cache/kmsg.log", O_WRONLY | O_CREAT | O_APPEND, 0777);
+    if (fd < 0) {
+        LOGE("%s: Failed to open file: %s",
+             "/note3cache/kmsg.log", strerror(errno));
+        return false;
+    }
+
+    auto close_fd = util::finally([&]{
+        close(fd);
+    });
+
+    // Write separator
+    write(fd, "\n\n\n\n\n\n\n\n\n\n", 10);
+    for (int i = 0; i < 80; ++i) {
+        write(fd, "-", 1);
+    }
+    write(fd, "\n\n\n\n\n\n\n\n\n\n", 10);
+
+    // Dump kmsg
+    char buf[16];
+    ssize_t nread;
+
+    while ((nread = read(fd_kmsg, buf, sizeof(buf))) > 0) {
+        char *out_ptr = buf;
+        ssize_t nwritten;
+
+        do {
+            if ((nwritten = write(fd, out_ptr, nread)) < 0) {
+                LOGE("%s: Failed to write file: %s",
+                     "/note3cache/kmsg.log", strerror(errno));
+                return false;
+            }
+
+            nread -= nwritten;
+            out_ptr += nwritten;
+        } while (nread > 0);
+    }
+
+    if (nread != 0) {
+        LOGE("%s: Failed to read file: %s", "/proc/kmsg", strerror(errno));
+    } else {
+        LOGE("%s: WTF: kmsg reached EOF", "/proc/kmsg");
+    }
+
+    return false;
+}
+
 static bool emergency_reboot()
 {
 #if RUN_ADB_BEFORE_EXEC_OR_REBOOT
@@ -1372,6 +1473,18 @@ int init_main(int argc, char *argv[])
 
     LOGV("Booting up with version %s (%s)",
          version(), git_version());
+
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            note_3_hack();
+            _exit(1);
+        } else if (pid > 0) {
+            LOGV("Started Note 3 hack thread");
+        } else {
+            LOGE("Failed to start Note 3 hack thread");
+        }
+    }
 
     std::vector<unsigned char> contents;
     util::file_read_all(DEVICE_JSON_PATH, &contents);
