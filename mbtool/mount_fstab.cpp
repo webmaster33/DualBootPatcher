@@ -452,13 +452,13 @@ static bool try_extsd_mount(const char *block_dev, const char *mount_point)
 
     LOGD("Using fuse-exfat: %d", use_fuse_exfat);
 
+    if (mount_vfat(block_dev, mount_point)) {
+        return true;
+    }
     if (use_fuse_exfat && mount_exfat_fuse(block_dev, mount_point)) {
         return true;
     }
     if (mount_exfat_kernel(block_dev, mount_point)) {
-        return true;
-    }
-    if (mount_vfat(block_dev, mount_point)) {
         return true;
     }
     if (mount_ext4(block_dev, mount_point)) {
