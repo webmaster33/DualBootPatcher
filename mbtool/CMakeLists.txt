@@ -1,140 +1,140 @@
-if(NOT ${MBP_BUILD_TARGET} STREQUAL android-system)
-    return()
-endif()
-
-set(CMAKE_INCLUDE_CURRENT_DIR ON)
-
-include_directories(${MBP_JANSSON_INCLUDES})
-include_directories(${MBP_LIBARCHIVE_INCLUDES})
-include_directories(${MBP_LIBSEPOL_INCLUDES})
-include_directories(${MBP_OPENSSL_INCLUDES})
-include_directories(${MBP_PROCPS_NG_INCLUDES})
-include_directories(${CMAKE_SOURCE_DIR}/external)
-include_directories(${CMAKE_SOURCE_DIR}/external/flatbuffers/include)
-include_directories(${CMAKE_SOURCE_DIR}/external/pugixml/src)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/linux-api-headers)
-
-# To debug using valgrind, set DEBUGGING to TRUE and push
-# <build dir>/mbtool/mbtool-prefix/tmp/local/armeabi-v7a/mbtool_recovery
-# to /tmp/updater. If the recovery used is TWRP, click the console window
-# button so tapping the screen won't perform unwanted operations (debugging
-# through ADB does not send SIGSTOP to the recovery process).
-#
-# Then, unpack valgrind (presumably to /data) and run:
-#   /data/local/Inst/bin/valgrind \
-#       -v --track-origins=yes --leak-check=full \
-#       /tmp/updater 3 1 /tmp/test_patched.zip
-#
-# Note that when DEBUGGING is set to true, the binary is not statically
-# linked, so the API 21 libc.so, libdl.so, and libcutils.so are needed.
-# If the ROM installed on the device is a Lollipop ROM, just run the
-# following before running valgrind:
-#   cp /system/lib/libc.so /tmp/
-#   cp /system/lib/libdl.so /tmp/
-#   cp /system/lib/libcutils.so /tmp/
-#   cd /tmp/
-set(DEBUGGING FALSE)
-
-# Generate validcerts.cpp
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/validcerts.cpp.in
-    ${CMAKE_CURRENT_BINARY_DIR}/gen/validcerts.cpp
-)
-
-set(MINIADBD_SOURCES
-    miniadbd/adb.cpp
-    miniadbd/adb_io.cpp
-    miniadbd/adb_log.cpp
-    miniadbd/adb_utils.cpp
-    miniadbd/fdevent.cpp
-    miniadbd/file_sync_service.cpp
-    miniadbd/services.cpp
-    miniadbd/sockets.cpp
-    miniadbd/transport.cpp
-    miniadbd/transport_usb.cpp
-    miniadbd/usb_linux_client.cpp
-)
-
-set(MBTOOL_BASE_SOURCES
-    appsync.cpp
-    appsyncmanager.cpp
-    auditd.cpp
-    daemon.cpp
-    daemon_v3.cpp
-    decrypt.cpp
-    emergency.cpp
-    init.cpp
-    main.cpp
-    miniadbd.cpp
-    mount_fstab.cpp
-    multiboot.cpp
-    packages.cpp
-    reboot.cpp
-    romconfig.cpp
-    roms.cpp
-    sepolpatch.cpp
-    signature.cpp
-    switcher.cpp
-    uevent_dump.cpp
-    wipe.cpp
-    external/legacy_property_service.cpp
-    external/audit/libaudit.cpp
-    external/property_service.cpp
-    initwrapper/cutils/uevent.cpp
-    initwrapper/devices.cpp
-    initwrapper/util.cpp
-    ${CMAKE_CURRENT_BINARY_DIR}/gen/validcerts.cpp
-    ${CMAKE_SOURCE_DIR}/external/pugixml/src/pugixml.cpp
-)
-
-set(MBTOOL_RECOVERY_SOURCES
-    backup.cpp
-    image.cpp
-    installer.cpp
-    rom_installer.cpp
-    update_binary.cpp
-    update_binary_tool.cpp
-    utilities.cpp
+set_source_files_properties(
+    src/boot/audit/libaudit.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-cast-align -Wno-conversion -Wno-gnu-statement-expression -Wno-old-style-cast -Wno-shorten-64-to-32 -Wno-sign-conversion"
 )
 
 set_source_files_properties(
-    miniadbd.cpp
-    external/audit/libaudit.h
-    external/audit/libaudit.cpp
-    external/property_service.cpp
+    src/boot/auditd.cpp
     PROPERTIES
-    COMPILE_FLAGS "-Wno-gnu-statement-expression -Wno-zero-length-array"
+    COMPILE_FLAGS
+    "-Wno-gnu-statement-expression -Wno-zero-length-array"
+)
+
+set_source_files_properties(
+    src/boot/daemon_v3.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-missing-declarations"
+)
+
+set_source_files_properties(
+    src/boot/packages.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-format-nonliteral"
+)
+
+set_source_files_properties(
+    src/boot/property_service.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-gnu-statement-expression -Wno-shorten-64-to-32 -Wno-sign-conversion"
+)
+
+set_source_files_properties(
+    src/util/legacy_property_service.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-shorten-64-to-32 -Wno-sign-conversion"
+)
+
+set_source_files_properties(
+    src/util/sepolpatch.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-keyword-macro"
+)
+
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/external/pugixml/src/pugixml.cpp
+    PROPERTIES
+    COMPILE_FLAGS
+    "-Wno-double-promotion -Wno-sign-conversion"
 )
 
 if(${MBP_BUILD_TARGET} STREQUAL android-system)
-    # minizip type safety
-    add_definitions(-DSTRICTZIPUNZIP)
-
-    # Disable some pugixml features
-    add_definitions(
-        -DPUGIXML_NO_EXCEPTIONS
-        -DPUGIXML_NO_STL
-        -DPUGIXML_NO_XPATH
+    # Generate validcerts.cpp
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/util/validcerts.cpp.in
+        ${CMAKE_CURRENT_BINARY_DIR}/gen/validcerts.cpp
     )
-
-    if(DEBUGGING)
-        add_definitions(-DDYNAMICALLY_LINKED)
-    endif()
 
     add_library(
-        miniadbd-static
+        mbtool-util
         STATIC
-        ${MINIADBD_SOURCES}
+        src/util/legacy_property_service.cpp
+        src/util/multiboot.cpp
+        src/util/romconfig.cpp
+        src/util/roms.cpp
+        src/util/sepolpatch.cpp
+        src/util/signature.cpp
+        src/util/switcher.cpp
+        src/util/wipe.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/gen/validcerts.cpp
     )
+
     add_executable(
         mbtool
-        ${MBTOOL_BASE_SOURCES}
+        src/boot/appsync.cpp
+        src/boot/appsyncmanager.cpp
+        src/boot/audit/libaudit.cpp
+        src/boot/auditd.cpp
+        src/boot/daemon.cpp
+        src/boot/daemon_v3.cpp
+        src/boot/emergency.cpp
+        src/boot/init.cpp
+        src/boot/init/cutils/uevent.cpp
+        src/boot/init/devices.cpp
+        src/boot/init/uevent_listener.cpp
+        src/boot/mount_fstab.cpp
+        src/boot/packages.cpp
+        src/boot/properties.cpp
+        src/boot/property_service.cpp
+        src/boot/reboot.cpp
+        src/boot/uevent_dump.cpp
+        src/boot/uevent_thread.cpp
+        src/main.cpp
+        ${CMAKE_SOURCE_DIR}/external/pugixml/src/pugixml.cpp
     )
+
     add_executable(
         mbtool_recovery
-        ${MBTOOL_BASE_SOURCES}
-        ${MBTOOL_RECOVERY_SOURCES}
+        src/main.cpp
+        src/recovery/archive_util.cpp
+        src/recovery/backup.cpp
+        src/recovery/bootimg_util.cpp
+        src/recovery/image.cpp
+        src/recovery/installer.cpp
+        src/recovery/installer_util.cpp
+        src/recovery/ramdisk_patcher.cpp
+        src/recovery/rom_installer.cpp
+        src/recovery/update_binary.cpp
+        src/recovery/update_binary_tool.cpp
+        src/recovery/utilities.cpp
     )
+
+    foreach(target mbtool-util mbtool mbtool_recovery)
+        # Includes
+        target_include_directories(
+            ${target}
+            PRIVATE
+            include
+            ${CMAKE_SOURCE_DIR}/external/flatbuffers/include
+            ${CMAKE_SOURCE_DIR}/external/minizip
+            ${CMAKE_SOURCE_DIR}/external/pugixml/src
+        )
+
+        # Disable some pugixml features
+        target_compile_definitions(
+            ${target}
+            PRIVATE
+            -DPUGIXML_NO_EXCEPTIONS
+            -DPUGIXML_NO_STL
+            -DPUGIXML_NO_XPATH
+        )
+    endforeach()
 
     target_compile_definitions(
         mbtool_recovery
@@ -142,74 +142,39 @@ if(${MBP_BUILD_TARGET} STREQUAL android-system)
         -DRECOVERY
     )
 
-    # Ugly, but I don't want to deviate too much from upstream to fix it
-    target_compile_options(
-        miniadbd-static
+    unix_link_executable_statically(mbtool mbtool_recovery)
+
+    target_link_libraries(
+        mbtool-util
         PRIVATE
-        -Wno-missing-field-initializers -Wno-pedantic -Wno-unused-parameter
-        -Wno-gnu-statement-expression
-    )
-
-    set_target_properties(
-        miniadbd-static
-        mbtool
-        mbtool_recovery
-        PROPERTIES
-        POSITION_INDEPENDENT_CODE 1
-    )
-
-    if(NOT MSVC)
-        set_target_properties(
-            miniadbd-static
-            mbtool
-            mbtool_recovery
-            PROPERTIES
-            CXX_STANDARD 11
-            CXX_STANDARD_REQUIRED 1
-            C_STANDARD 99
-            C_STANDARD_REQUIRED 1
-        )
-    endif()
-
-    if(NOT DEBUGGING)
-        set_target_properties(
-            mbtool mbtool_recovery
-            PROPERTIES
-            LINK_FLAGS "-static"
-            LINK_SEARCH_START_STATIC ON
-        )
-    endif()
-
-    target_link_libraries(
-        mbtool
-        miniadbd-static
+        interface.global.CXXVersion
+        PUBLIC
         mbutil-static
         mbsign-static
         mbdevice-static
         mblog-static
         mbcommon-static
-        minizip-static
-        ${MBP_JANSSON_LIBRARIES}
-        ${MBP_PROCPS_NG_LIBRARIES}
-        ${MBP_ZLIB_LIBRARIES}
+        rapidjson
+    )
+
+    target_link_libraries(
+        mbtool
+        PRIVATE
+        interface.global.CXXVersion
+        mbtool-util
+        mbbootimg-static
+        libminizip
+        Procps::Procps
     )
     target_link_libraries(
         mbtool_recovery
-        miniadbd-static
-        mbutil-static
-        mbsign-static
-        mblog-static
-        mbp-static
-        mbpio-static
-        mbdevice-static
-        mbcommon-static
-        minizip-static
-        ${MBP_JANSSON_LIBRARIES}
-        ${MBP_LIBARCHIVE_LIBRARIES}
-        ${MBP_LIBLZMA_LIBRARIES}
-        ${MBP_LZ4_LIBRARIES}
-        ${MBP_LZO_LIBRARIES}
-        ${MBP_ZLIB_LIBRARIES}
+        PRIVATE
+        interface.global.CXXVersion
+        mbtool-util
+        mbbootimg-static
+        libminizip
+        LibArchive::LibArchive
+        Procps::Procps # TODO
     )
 
     install(

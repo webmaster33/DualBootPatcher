@@ -1,22 +1,26 @@
 /*
- * Copyright (C) 2016  Andrew Gunnerson <andrewgunnerson@gmail.com>
+ * Copyright (C) 2016-2018  Andrew Gunnerson <andrewgunnerson@gmail.com>
  *
- * This file is part of MultiBootPatcher
+ * This file is part of DualBootPatcher
  *
- * MultiBootPatcher is free software: you can redistribute it and/or modify
+ * DualBootPatcher is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * MultiBootPatcher is distributed in the hope that it will be useful,
+ * DualBootPatcher is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with MultiBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
+ * along with DualBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
+#include <chrono>
+#include <memory>
+#include <thread>
 #include <vector>
 
 #include <cerrno>
@@ -30,27 +34,31 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+// libmbcommon
+#include "mbcommon/error_code.h"
+#include "mbcommon/file/callbacks.h"
+#include "mbcommon/file/standard.h"
+#include "mbcommon/finally.h"
+#include "mbcommon/integer.h"
+#include "mbcommon/string.h"
+
 // libmbsparse
 #include "mbsparse/sparse.h"
 
 // libmbdevice
 #include "mbdevice/json.h"
-#include "mbdevice/validate.h"
 
 // libmbutil
 #include "mbutil/command.h"
 #include "mbutil/copy.h"
-#include "mbutil/finally.h"
+#include "mbutil/delete.h"
+#include "mbutil/file.h"
 #include "mbutil/mount.h"
 #include "mbutil/properties.h"
 
 // minizip
 #include <archive.h>
 #include <archive_entry.h>
-
-#define DEBUG_SKIP_FLASH_SYSTEM 0
-#define DEBUG_SKIP_FLASH_CSC    0
-#define DEBUG_SKIP_FLASH_BOOT   0
 
 #define SYSTEM_SPARSE_FILE      "system.img.sparse"
 #define CACHE_SPARSE_FILE       "cache.img.sparse"
@@ -62,6 +70,7 @@
 #define TEMP_CACHE_MOUNT_FILE   "/tmp/cache.img"
 #define TEMP_CACHE_MOUNT_DIR    "/tmp/cache"
 #define TEMP_CSC_ZIP_FILE       TEMP_CACHE_MOUNT_DIR "/recovery/sec_csc.zip"
+#define TEMP_OMC_ZIP_FILE       TEMP_CACHE_MOUNT_DIR "/recovery/sec_omc.zip"
 #define TEMP_FUSE_SPARSE_FILE   "/tmp/fuse-sparse"
 
 #define EFS_SALES_CODE_FILE     "/efs/imei/mps_code.dat"
@@ -69,16 +78,28 @@
 #define PROP_SYSTEM_DEV         "system"
 #define PROP_BOOT_DEV           "boot"
 
+using ScopedArchive = std::unique_ptr<archive, decltype(archive_free) *>;
+using ScopedFILE = std::unique_ptr<FILE, decltype(fclose) *>;
+
+using namespace mb::device;
+
+enum class ExtractResult : uint8_t
+{
+    Ok,
+    Missing,
+    Error,
+};
+
 static int interface;
 static int output_fd;
 static const char *zip_file;
 
-static char sales_code[10];
+static std::string sales_code;
 static std::string system_block_dev;
 static std::string boot_block_dev;
 
-__attribute__((format(printf, 1, 2)))
-void ui_print(const char *fmt, ...)
+MB_PRINTF(1, 2)
+static void ui_print(const char *fmt, ...)
 {
     va_list ap;
     va_list copy;
@@ -100,13 +121,13 @@ void ui_print(const char *fmt, ...)
     va_end(ap);
 }
 
-void set_progress(double frac)
+static void set_progress(double frac)
 {
     dprintf(output_fd, "set_progress %f\n", frac);
 }
 
-__attribute__((format(printf, 1, 2)))
-void error(const char *fmt, ...)
+MB_PRINTF(1, 2)
+static void error(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -115,8 +136,8 @@ void error(const char *fmt, ...)
     fputc('\n', stderr);
 }
 
-__attribute__((format(printf, 1, 2)))
-void info(const char *fmt, ...)
+MB_PRINTF(1, 2)
+static void info(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -125,12 +146,9 @@ void info(const char *fmt, ...)
     fputc('\n', stdout);
 }
 
-static bool mount_system()
+static bool run_command(const std::vector<std::string> &argv)
 {
-    // mbtool will redirect the call
-    const char *argv[] = { "mount", "/system", nullptr };
-    int status = mb::util::run_command(argv[0], argv, nullptr, nullptr,
-                                       nullptr, nullptr);
+    int status = mb::util::run_command(argv[0], argv, {}, {}, {});
     if (status < 0) {
         error("Failed to run command: %s", strerror(errno));
         return false;
@@ -142,21 +160,16 @@ static bool mount_system()
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+static bool mount_system()
+{
+    // mbtool will redirect the call
+    return run_command({ "mount", "/system" });
+}
+
 static bool umount_system()
 {
     // mbtool will redirect the call
-    const char *argv[] = { "umount", "/system", nullptr };
-    int status = mb::util::run_command(argv[0], argv, nullptr, nullptr,
-                                       nullptr, nullptr);
-    if (status < 0) {
-        error("Failed to run command: %s", strerror(errno));
-        return false;
-    } else if (WIFSIGNALED(status)) {
-        error("Command killed by signal: %d", WTERMSIG(status));
-        return false;
-    }
-
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return run_command({ "umount", "/system" });
 }
 
 static bool la_open_zip(archive *a, const char *filename)
@@ -176,67 +189,56 @@ static bool la_open_zip(archive *a, const char *filename)
     return true;
 }
 
-static bool la_skip_to(archive *a, const char *filename, archive_entry **entry)
+static ExtractResult la_skip_to(archive *a, const char *filename,
+                                archive_entry **entry)
 {
     int ret;
     while ((ret = archive_read_next_header(a, entry)) == ARCHIVE_OK) {
         const char *name = archive_entry_pathname(*entry);
         if (!name) {
             error("libarchive: Failed to get filename");
-            return false;
+            return ExtractResult::Error;
         }
 
         if (strcmp(filename, name) == 0) {
-            return true;
+            return ExtractResult::Ok;
         }
     }
     if (ret != ARCHIVE_EOF) {
         error("libarchive: Failed to read header: %s", archive_error_string(a));
-        return false;
+        return ExtractResult::Error;
     }
 
     error("libarchive: Failed to find %s in zip", filename);
-    return false;
+    return ExtractResult::Missing;
 }
 
 static bool load_sales_code()
 {
-    int fd = open64(EFS_SALES_CODE_FILE, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        error("%s: Failed to open file: %s",
-              EFS_SALES_CODE_FILE, strerror(errno));
+    auto line = mb::util::file_first_line(EFS_SALES_CODE_FILE);
+    if (!line) {
+        error("%s: Failed to read file: %s",
+              EFS_SALES_CODE_FILE, line.error().message().c_str());
         return false;
-    } else {
-        ssize_t n = read(fd, sales_code, sizeof(sales_code) - 1);
-        close(fd);
-        if (n < 0) {
-            error("%s: Failed to read file: %s",
-                  EFS_SALES_CODE_FILE, strerror(errno));
-            return false;
-        }
-        sales_code[n] = '\0';
-
-        char *newline = strchr(sales_code, '\n');
-        if (newline) {
-            *newline = '\0';
-        }
     }
 
-    if (!*sales_code) {
+    sales_code = std::move(line.value());
+
+    if (sales_code.empty()) {
         error("Sales code is empty");
         return false;
     }
 
-    info("EFS partition says sales code is: %s", sales_code);
+    info("EFS partition says sales code is: %s", sales_code.c_str());
     return true;
 }
 
 static bool load_block_devs()
 {
-    system_block_dev[0] = '\0';
-    boot_block_dev[0] = '\0';
+    system_block_dev.clear();
+    boot_block_dev.clear();
 
-    Device *device;
+    Device device;
 
     {
         archive *a = archive_read_new();
@@ -245,7 +247,7 @@ static bool load_block_devs()
             return false;
         }
 
-        auto close_archive = mb::util::finally([&]{
+        auto close_archive = mb::finally([&]{
             archive_read_free(a);
         });
 
@@ -254,13 +256,13 @@ static bool load_block_devs()
         }
 
         archive_entry *entry;
-        if (!la_skip_to(a, DEVICE_JSON_FILE, &entry)) {
+        if (la_skip_to(a, DEVICE_JSON_FILE, &entry) != ExtractResult::Ok) {
             return false;
         }
 
-        static const size_t max_size = 10240;
+        static constexpr size_t max_size = 10240;
 
-        if (archive_entry_size(entry) >= max_size) {
+        if (archive_entry_size(entry) >= static_cast<int64_t>(max_size)) {
             error("%s is too large", DEVICE_JSON_FILE);
             return false;
         }
@@ -276,53 +278,43 @@ static bool load_block_devs()
         }
 
         // Buffer is already NULL-terminated
-        MbDeviceJsonError ret;
-        device = mb_device_new_from_json(buf.data(), &ret);
-        if (!device) {
+        JsonError ret;
+        if (!device_from_json(buf.data(), device, ret)) {
             error("Failed to load %s", DEVICE_JSON_FILE);
             return false;
         }
     }
 
-    auto free_device = mb::util::finally([&]{
-        mb_device_free(device);
-    });
-
-    auto flags = mb_device_validate(device);
-    if (flags != 0) {
-        error("Device definition file is invalid: %" PRIu64, flags);
+    auto flags = device.validate();
+    if (flags) {
+        error("Device definition file is invalid: %" PRIu64,
+              static_cast<uint64_t>(flags));
         return false;
     }
 
-    auto system_devs = mb_device_system_block_devs(device);
-    auto boot_devs = mb_device_boot_block_devs(device);
+    auto is_blk_device = [](const std::string &path) {
+        struct stat sb;
+        return stat(path.c_str(), &sb) == 0 && S_ISBLK(sb.st_mode);
+    };
 
-    struct stat sb;
-
-    if (system_devs) {
-        for (auto it = system_devs; *it; ++it) {
-            if (stat(*it, &sb) == 0 && S_ISBLK(sb.st_mode)) {
-                system_block_dev = *it;
-                break;
-            }
+    {
+        auto devs = device.system_block_devs();
+        auto it = std::find_if(devs.begin(), devs.end(), is_blk_device);
+        if (it == devs.end()) {
+            error("%s: No system block device specified", DEVICE_JSON_FILE);
+            return false;
         }
-    }
-    if (boot_devs) {
-        for (auto it = boot_devs; *it; ++it) {
-            if (stat(*it, &sb) == 0 && S_ISBLK(sb.st_mode)) {
-                boot_block_dev = *it;
-                break;
-            }
-        }
+        system_block_dev = *it;
     }
 
-    if (system_block_dev.empty()) {
-        error("%s: No system block device specified", DEVICE_JSON_FILE);
-        return false;
-    }
-    if (boot_block_dev.empty()) {
-        error("%s: No boot block device specified", DEVICE_JSON_FILE);
-        return false;
+    {
+        auto devs = device.boot_block_devs();
+        auto it = std::find_if(devs.begin(), devs.end(), is_blk_device);
+        if (it == devs.end()) {
+            error("%s: No boot block device specified", DEVICE_JSON_FILE);
+            return false;
+        }
+        boot_block_dev = *it;
     }
 
     info("System block device: %s", system_block_dev.c_str());
@@ -331,10 +323,11 @@ static bool load_block_devs()
     return true;
 }
 
-static bool cb_zip_read(void *buf, uint64_t size, uint64_t *bytes_read,
-                        void *user_data)
+static mb::oc::result<size_t> cb_zip_read(archive *a, mb::File &file,
+                                          void *buf, size_t size)
 {
-    archive *a = (archive *) user_data;
+    (void) file;
+
     uint64_t total = 0;
 
     while (size > 0) {
@@ -342,121 +335,122 @@ static bool cb_zip_read(void *buf, uint64_t size, uint64_t *bytes_read,
         if (n < 0) {
             error("libarchive: Failed to read data: %s",
                   archive_error_string(a));
-            return false;
+            return mb::ec_from_errno(archive_errno(a));
         } else if (n == 0) {
             break;
         }
 
-        total += n;
-        size -= n;
-        buf = (char *) buf + n;
+        total += static_cast<size_t>(n);
+        size -= static_cast<size_t>(n);
+        buf = static_cast<char *>(buf) + n;
     }
 
-    *bytes_read = total;
-    return true;
+    return static_cast<size_t>(total);
 }
 
-#if DEBUG_SKIP_FLASH_SYSTEM
-__attribute__((unused))
-#endif
-static bool extract_sparse_file(const char *zip_filename,
-                                const char *out_filename)
+static ExtractResult extract_sparse_file(const char *zip_filename,
+                                         const char *out_filename)
 {
-    struct SparseCtx *ctx;
-    char buf[10240];
-    uint64_t n;
-    bool sparse_ret;
-    int fd;
-    uint64_t cur_bytes = 0;
-    uint64_t max_bytes = 0;
-    uint64_t old_bytes = 0;
-    double old_ratio;
-    double new_ratio;
+    using namespace std::placeholders;
 
-    archive *a = archive_read_new();
+    ScopedArchive a{archive_read_new(), &archive_read_free};
+    mb::CallbackFile file;
+    mb::sparse::SparseFile sparse_file;
+    mb::StandardFile out_file;
+
     if (!a) {
         error("Out of memory");
-        goto error;
+        return ExtractResult::Error;
     }
 
-    if (!la_open_zip(a, zip_file)) {
-        goto error_la_allocated;
+    if (!la_open_zip(a.get(), zip_file)) {
+        return ExtractResult::Error;
     }
 
     archive_entry *entry;
-    if (!la_skip_to(a, zip_filename, &entry)) {
-        goto error_la_allocated;
+    auto result = la_skip_to(a.get(), zip_filename, &entry);
+    if (result != ExtractResult::Ok) {
+        return result;
     }
 
-    ctx = sparseCtxNew();
-    if (!ctx) {
-        error("Out of memory");
-        goto error_la_allocated;
+    auto open_ret = file.open(nullptr, nullptr,
+                              std::bind(cb_zip_read, a.get(), _1, _2, _3),
+                              nullptr, nullptr, nullptr);
+    if (!open_ret) {
+        error("Failed to open sparse file in zip: %s",
+              open_ret.error().message().c_str());
+        return ExtractResult::Error;
     }
 
-    if (!sparseOpen(ctx, nullptr, nullptr, &cb_zip_read, nullptr, nullptr, a)) {
-        error("Failed to open sparse file");
-        goto error_sparse_allocated;
+    open_ret = sparse_file.open(&file);
+    if (!open_ret) {
+        error("Failed to open sparse file: %s",
+              open_ret.error().message().c_str());
+        return ExtractResult::Error;
     }
 
-    fd = open64(out_filename,
-                O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC | O_LARGEFILE, 0600);
-    if (fd < 0) {
-        error("%s: Failed to open: %s", out_filename, strerror(errno));
-        goto error_sparse_allocated;
+    open_ret = out_file.open(out_filename, mb::FileOpenMode::WriteOnly);
+    if (!open_ret) {
+        error("%s: Failed to open for writing: %s",
+              out_filename, open_ret.error().message().c_str());
+        return ExtractResult::Error;
     }
 
-    sparseSize(ctx, &max_bytes);
+    char buf[10240];
+    uint64_t cur_bytes = 0;
+    uint64_t max_bytes = sparse_file.size();
+    uint64_t old_bytes = 0;
 
     set_progress(0);
 
-    while ((sparse_ret = sparseRead(ctx, buf, sizeof(buf), &n)) && n > 0) {
+    while (true) {
+        auto n = sparse_file.read(buf, sizeof(buf));
+        if (!n) {
+            error("Failed to read sparse file %s: %s",
+                  zip_filename, n.error().message().c_str());
+            return ExtractResult::Error;
+        } else if (n.value() == 0) {
+            break;
+        }
+
         // Rate limit: update progress only after difference exceeds 0.1%
-        old_ratio = (double) old_bytes / max_bytes;
-        new_ratio = (double) cur_bytes / max_bytes;
+        double old_ratio = static_cast<double>(old_bytes) / max_bytes;
+        double new_ratio = static_cast<double>(cur_bytes) / max_bytes;
         if (new_ratio - old_ratio >= 0.001) {
             set_progress(new_ratio);
             old_bytes = cur_bytes;
         }
 
         char *out_ptr = buf;
-        ssize_t nwritten;
 
-        do {
-            if ((nwritten = write(fd, out_ptr, n)) < 0) {
-                error("%s: Failed to write: %s",
-                      out_filename, strerror(errno));
-                goto error_fd_opened;
+        while (n.value() > 0) {
+            auto n_written = out_file.write(buf, n.value());
+            if (!n_written) {
+                error("%s: Failed to write file: %s",
+                      out_filename, n_written.error().message().c_str());
+                return ExtractResult::Error;
             }
 
-            n -= nwritten;
-            out_ptr += nwritten;
-            cur_bytes += nwritten;
-        } while (n > 0);
-    }
-    if (!sparse_ret) {
-        error("Failed to read sparse file %s", zip_filename);
-        goto error_fd_opened;
+            n.value() -= n_written.value();
+            out_ptr += n_written.value();
+            cur_bytes += n_written.value();
+        }
     }
 
-    close(fd);
-    sparseCtxFree(ctx);
-    archive_read_free(a);
-    return true;
+    auto close_ret = out_file.close();
+    if (!close_ret) {
+        error("%s: Failed to close file: %s",
+              out_filename, close_ret.error().message().c_str());
+        return ExtractResult::Error;
+    }
 
-error_fd_opened:
-    close(fd);
-error_sparse_allocated:
-    sparseCtxFree(ctx);
-error_la_allocated:
-    archive_read_free(a);
-error:
-    return false;
+    return ExtractResult::Ok;
 }
 
-static bool extract_raw_file(const char *zip_filename,
-                             const char *out_filename)
+static ExtractResult extract_raw_file(const char *zip_filename,
+                                      const char *out_filename)
 {
+    ScopedArchive a{archive_read_new(), &archive_read_free};
     char buf[10240];
     la_ssize_t n;
     int fd;
@@ -466,36 +460,40 @@ static bool extract_raw_file(const char *zip_filename,
     double old_ratio;
     double new_ratio;
 
-    archive *a = archive_read_new();
     if (!a) {
         error("Out of memory");
-        goto error;
+        return ExtractResult::Error;
     }
 
-    if (!la_open_zip(a, zip_file)) {
-        goto error_la_allocated;
+    if (!la_open_zip(a.get(), zip_file)) {
+        return ExtractResult::Error;
     }
 
     archive_entry *entry;
-    if (!la_skip_to(a, zip_filename, &entry)) {
-        goto error_la_allocated;
+    auto result = la_skip_to(a.get(), zip_filename, &entry);
+    if (result != ExtractResult::Ok) {
+        return result;
     }
 
-    max_bytes = archive_entry_size(entry);
+    max_bytes = static_cast<uint64_t>(archive_entry_size(entry));
 
     fd = open64(out_filename,
                 O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC | O_LARGEFILE, 0600);
     if (fd < 0) {
         error("%s: Failed to open: %s", out_filename, strerror(errno));
-        goto error_la_allocated;
+        return ExtractResult::Error;
     }
+
+    auto close_fd = mb::finally([fd]{
+        close(fd);
+    });
 
     set_progress(0);
 
-    while ((n = archive_read_data(a, buf, sizeof(buf))) > 0) {
+    while ((n = archive_read_data(a.get(), buf, sizeof(buf))) > 0) {
         // Rate limit: update progress only after difference exceeds 0.1%
-        old_ratio = (double) old_bytes / max_bytes;
-        new_ratio = (double) cur_bytes / max_bytes;
+        old_ratio = static_cast<double>(old_bytes) / max_bytes;
+        new_ratio = static_cast<double>(cur_bytes) / max_bytes;
         if (new_ratio - old_ratio >= 0.001) {
             set_progress(new_ratio);
             old_bytes = cur_bytes;
@@ -505,10 +503,10 @@ static bool extract_raw_file(const char *zip_filename,
         ssize_t nwritten;
 
         do {
-            if ((nwritten = write(fd, out_ptr, n)) < 0) {
+            if ((nwritten = write(fd, out_ptr, static_cast<size_t>(n))) < 0) {
                 error("%s: Failed to write: %s",
                       out_filename, strerror(errno));
-                goto error_fd_opened;
+                return ExtractResult::Error;
             }
 
             n -= nwritten;
@@ -517,20 +515,150 @@ static bool extract_raw_file(const char *zip_filename,
     }
     if (n != 0) {
         error("libarchive: %s: Failed to read %s: %s",
-              zip_file, zip_filename, archive_error_string(a));
-        goto error_fd_opened;
+              zip_file, zip_filename, archive_error_string(a.get()));
+        return ExtractResult::Error;
     }
 
-    close(fd);
-    archive_read_free(a);
-    return true;
+    return ExtractResult::Ok;
+}
 
-error_fd_opened:
-    close(fd);
-error_la_allocated:
-    archive_read_free(a);
-error:
-    return false;
+static bool disable_vaultkeeper(const char *path)
+{
+    // Open old properties file
+    ScopedFILE fp_old(fopen(path, "rbe"), fclose);
+    if (!fp_old) {
+        if (errno == ENOENT) {
+            return true;
+        } else {
+            error("%s: Failed to open for reading: %s",
+                  path, strerror(errno));
+            return false;
+        }
+    }
+
+    // Create temp file for modified properties file
+    std::string new_path(path);
+    new_path += ".XXXXXX";
+
+    int fd = mkstemp(new_path.data());
+    if (fd < 0) {
+        error("%s: Failed to create temporary file: %s",
+              path, strerror(errno));
+        return false;
+    }
+
+    auto unlink_new_path = mb::finally([&] {
+        unlink(new_path.c_str());
+    });
+
+    auto close_fd = mb::finally([&] {
+        close(fd);
+    });
+
+    ScopedFILE fp_new(fdopen(fd, "wb"), fclose);
+    if (!fp_new) {
+        error("%s: Failed to open for writing: %s",
+              new_path.c_str(), strerror(errno));
+        return false;
+    }
+
+    // fclose() will close the file descriptor
+    close_fd.dismiss();
+
+    char *line = nullptr;
+    size_t len = 0;
+    ssize_t read = 0;
+
+    auto free_line = mb::finally([&] {
+        free(line);
+    });
+
+    static const char *prefix = "ro.security.vaultkeeper.feature=";
+
+    bool changed = false;
+
+    while ((read = getline(&line, &len, fp_old.get())) >= 0) {
+        if (mb::starts_with(line, prefix)) {
+            changed = true;
+
+            if (fprintf(fp_new.get(), "%s0\n", prefix) < 0) {
+                error("%s: Failed to write file: %s",
+                      new_path.c_str(), strerror(errno));
+                return false;
+            }
+        } else {
+            if (fwrite(line, 1, static_cast<size_t>(read), fp_new.get())
+                    != static_cast<size_t>(read)) {
+                error("%s: Failed to write file: %s",
+                      new_path.c_str(), strerror(errno));
+                return false;
+            }
+        }
+    }
+
+    // Atomically replace old properties file if it was changed
+    if (changed) {
+        struct stat sb;
+
+        if (fstat(fileno(fp_old.get()), &sb) < 0) {
+            error("%s: Failed to stat file: %s",
+                  path, strerror(errno));
+            return false;
+        }
+
+        if (fchown(fileno(fp_new.get()), sb.st_uid, sb.st_gid) < 0) {
+            error("%s: Failed to chown file: %s",
+                  new_path.c_str(), strerror(errno));
+            return false;
+        }
+
+        if (fchmod(fileno(fp_new.get()), sb.st_mode & 0777) < 0) {
+            error("%s: Failed to chmod file: %s",
+                  new_path.c_str(), strerror(errno));
+            return false;
+        }
+
+        if (rename(new_path.c_str(), path) < 0) {
+            error("%s: Failed to rename file: %s",
+                  new_path.c_str(), strerror(errno));
+            return false;
+        }
+
+        unlink_new_path.dismiss();
+    }
+
+    return true;
+}
+
+static bool kill_rlc()
+{
+    if (!mount_system()) {
+        error("Failed to mount system");
+        return false;
+    }
+
+    auto unmount_system_dir = mb::finally([]{
+        umount_system();
+    });
+
+    bool ret = true;
+
+    // Kill RLC app
+    if (auto r = mb::util::delete_recursive("/system/priv-app/Rlc"); !r) {
+        ret = false;
+    }
+
+    // Kill RLC/vaultkeeper property
+    for (auto path : {
+        "/system/build.prop",
+        "/vendor/build.prop",
+    }) {
+        if (!disable_vaultkeeper(path)) {
+            ret = false;
+        }
+    }
+
+    return ret;
 }
 
 static bool copy_dir_if_exists(const char *source_dir,
@@ -553,16 +681,41 @@ static bool copy_dir_if_exists(const char *source_dir,
         return false;
     }
 
-    bool ret = mb::util::copy_dir(source_dir, target_dir,
-                                  mb::util::COPY_ATTRIBUTES
-                                | mb::util::COPY_XATTRS
-                                | mb::util::COPY_EXCLUDE_TOP_LEVEL);
+    auto ret = mb::util::copy_dir(source_dir, target_dir,
+                                  mb::util::CopyFlag::CopyAttributes
+                                | mb::util::CopyFlag::CopyXattrs
+                                | mb::util::CopyFlag::ExcludeTopLevel);
     if (!ret) {
-        error("Failed to copy %s to %s: %s",
-              source_dir, target_dir, strerror(errno));
+        error("%s", ret.error().message().c_str());
     }
 
-    return ret;
+    return !!ret;
+}
+
+// Looping is necessary in Touchwiz, which sometimes fails to unmount the
+// fuse mountpoint on the first try (kernel bug?)
+static bool retry_unmount(const char *mount_point, unsigned int attempts)
+{
+    using namespace std::chrono_literals;
+
+    for (unsigned int attempt = 0; attempt < attempts; ++attempt) {
+        info("[Attempt %d/%d] Unmounting %s",
+             attempt + 1, attempts, mount_point);
+
+        if (!mb::util::umount(mount_point)) {
+            error("WARNING: Failed to unmount %s: %s",
+                  mount_point, strerror(errno));
+            info("[Attempt %d/%d] Waiting 1 second before next attempt",
+                 attempt + 1, attempts);
+            std::this_thread::sleep_for(1s);
+            continue;
+        }
+
+        info("Successfully unmounted %s", mount_point);
+        return true;
+    }
+
+    return false;
 }
 
 static bool apply_multi_csc()
@@ -574,9 +727,9 @@ static bool apply_multi_csc()
     char sales_code_csc_contents[100];
 
     snprintf(sales_code_system, sizeof(sales_code_system),
-             "/system/csc/%s/system", sales_code);
+             "/system/csc/%s/system", sales_code.c_str());
     snprintf(sales_code_csc_contents, sizeof(sales_code_csc_contents),
-             "/system/csc/%s/csc_contents", sales_code);
+             "/system/csc/%s/csc_contents", sales_code.c_str());
 
     // TODO: TouchWiz hard links files that go in /system/app
 
@@ -601,83 +754,71 @@ static bool apply_multi_csc()
     return true;
 }
 
-static bool flash_csc_zip()
+static bool flash_carrier_package_zip(const char *zip_path)
 {
-    archive *matcher;
-    archive *in;
-    archive *out;
+    ScopedArchive matcher{archive_match_new(), &archive_match_free};
+    ScopedArchive in{archive_read_new(), &archive_read_free};
+    ScopedArchive out{archive_write_disk_new(), &archive_write_free};
 
-    matcher = archive_match_new();
-    if (!matcher) {
-        error("libarchive: Out of memory when creating matcher");
-        goto error;
-    }
-    in = archive_read_new();
-    if (!in) {
-        error("libarchive: Out of memory when creating archive reader");
-        goto error_matcher_allocated;
-    }
-    out = archive_write_disk_new();
-    if (!out) {
-        error("libarchive: Out of memory when creating disk writer");
-        goto error_reader_allocated;
+    if (!matcher || !in || !out) {
+        error("libarchive: Out of memory");
+        return false;
     }
 
     // Only process system/* paths from zip
-    if (archive_match_include_pattern(matcher, "system/*") != ARCHIVE_OK) {
+    if (archive_match_include_pattern(matcher.get(), "system/*") != ARCHIVE_OK) {
         error("libarchive: Failed to add 'system/*' pattern: %s",
-              archive_error_string(matcher));
-        goto error_writer_allocated;
+              archive_error_string(matcher.get()));
+        return false;
     }
 
     // Set up archive reader parameters
-    archive_read_support_format_zip(in);
+    archive_read_support_format_zip(in.get());
 
     // Set up disk writer parameters
-    archive_write_disk_set_standard_lookup(out);
-    archive_write_disk_set_options(out, ARCHIVE_EXTRACT_TIME
-                                      | ARCHIVE_EXTRACT_SECURE_SYMLINKS
-                                      | ARCHIVE_EXTRACT_SECURE_NODOTDOT
-                                      | ARCHIVE_EXTRACT_OWNER
-                                      | ARCHIVE_EXTRACT_PERM
-                                      | ARCHIVE_EXTRACT_ACL
-                                      | ARCHIVE_EXTRACT_XATTR
-                                      | ARCHIVE_EXTRACT_FFLAGS
-                                      | ARCHIVE_EXTRACT_MAC_METADATA
-                                      | ARCHIVE_EXTRACT_SPARSE);
+    archive_write_disk_set_standard_lookup(out.get());
+    archive_write_disk_set_options(out.get(),
+                                   ARCHIVE_EXTRACT_TIME
+                                 | ARCHIVE_EXTRACT_SECURE_SYMLINKS
+                                 | ARCHIVE_EXTRACT_SECURE_NODOTDOT
+                                 | ARCHIVE_EXTRACT_OWNER
+                                 | ARCHIVE_EXTRACT_PERM
+                                 | ARCHIVE_EXTRACT_ACL
+                                 | ARCHIVE_EXTRACT_XATTR
+                                 | ARCHIVE_EXTRACT_FFLAGS
+                                 | ARCHIVE_EXTRACT_MAC_METADATA
+                                 | ARCHIVE_EXTRACT_SPARSE);
 
-    if (archive_read_open_filename(in, TEMP_CSC_ZIP_FILE, 10240)
+    if (archive_read_open_filename(in.get(), zip_path, 10240)
             != ARCHIVE_OK) {
         error("libarchive: %s: Failed to open file: %s",
-              zip_file, archive_error_string(in));
-        goto error_writer_allocated;
+              zip_path, archive_error_string(in.get()));
+        return false;
     }
 
     archive_entry *entry;
     int ret;
 
     while (true) {
-        ret = archive_read_next_header(in, &entry);
+        ret = archive_read_next_header(in.get(), &entry);
         if (ret == ARCHIVE_EOF) {
             break;
         } else if (ret == ARCHIVE_RETRY) {
-            info("libarchive: %s: Retrying header read", zip_file);
             continue;
         } else if (ret != ARCHIVE_OK) {
             error("libarchive: %s: Failed to read header: %s",
-                  zip_file, archive_error_string(in));
-            goto error_writer_allocated;
+                  zip_path, archive_error_string(in.get()));
+            return false;
         }
 
         const char *path = archive_entry_pathname(entry);
         if (!path || !*path) {
-            error("libarchive: %s: Header has null or empty filename",
-                  zip_file);
-            goto error_writer_allocated;
+            error("libarchive: %s: Header has null or empty filename", path);
+            return false;
         }
 
         // Check pattern matches
-        if (archive_match_excluded(matcher, entry)) {
+        if (archive_match_excluded(matcher.get(), entry)) {
             info("Skipping %s", path);
             continue;
         }
@@ -685,78 +826,57 @@ static bool flash_csc_zip()
         info("Extracting %s", path);
 
         // Extract file
-        ret = archive_read_extract2(in, entry, out);
+        ret = archive_read_extract2(in.get(), entry, out.get());
         if (ret != ARCHIVE_OK) {
-            error("%s: %s", path, archive_error_string(in));
-            goto error_writer_allocated;
+            error("%s: %s", path, archive_error_string(in.get()));
+            return false;
         }
     }
 
-    if (archive_write_close(out) != ARCHIVE_OK) {
+    if (archive_write_close(out.get()) != ARCHIVE_OK) {
         error("libarchive: Failed to close disk writer: %s",
-              archive_error_string(out));
-        goto error_writer_allocated;
+              archive_error_string(out.get()));
+        return false;
     }
 
-    archive_write_free(out);
-    archive_read_free(in);
-    archive_match_free(matcher);
     return true;
-
-error_writer_allocated:
-    archive_write_free(out);
-error_reader_allocated:
-    archive_read_free(in);
-error_matcher_allocated:
-    archive_match_free(matcher);
-error:
-    return false;
 }
 
-static bool flash_csc()
+static ExtractResult flash_carrier_package()
 {
-    int status;
-    bool unmounted_dir = false;
-    bool unmounted_file = false;
+    ExtractResult result;
 
-    if (!extract_raw_file(CACHE_SPARSE_FILE, TEMP_CACHE_SPARSE_FILE)) {
-        goto error;
+    result = extract_raw_file(CACHE_SPARSE_FILE, TEMP_CACHE_SPARSE_FILE);
+    if (result != ExtractResult::Ok) {
+        return result;
     }
 
-    if (!extract_raw_file(FUSE_SPARSE_FILE, TEMP_FUSE_SPARSE_FILE)) {
-        goto error;
+    result = extract_raw_file(FUSE_SPARSE_FILE, TEMP_FUSE_SPARSE_FILE);
+    if (result != ExtractResult::Ok) {
+        return ExtractResult::Error;
     }
 
     if (chmod(TEMP_FUSE_SPARSE_FILE, 0700) < 0) {
         error("%s: Failed to chmod: %s",
               TEMP_FUSE_SPARSE_FILE, strerror(errno));
-        goto error;
+        return ExtractResult::Error;
     }
 
     // Create temporary file for fuse
     close(open(TEMP_CACHE_MOUNT_FILE, O_CREAT | O_WRONLY | O_CLOEXEC, 0600));
 
     // Mount sparse file with fuse-sparse
-    {
-        const char *argv[] = {
-            TEMP_FUSE_SPARSE_FILE,
-            TEMP_CACHE_SPARSE_FILE,
-            TEMP_CACHE_MOUNT_FILE,
-            nullptr
-        };
-        status = mb::util::run_command(argv[0], argv, nullptr, nullptr,
-                                       nullptr, nullptr);
+    if (!run_command({
+        TEMP_FUSE_SPARSE_FILE,
+        TEMP_CACHE_SPARSE_FILE,
+        TEMP_CACHE_MOUNT_FILE
+    })) {
+        return ExtractResult::Error;
     }
-    if (status < 0) {
-        error("Failed to run command: %s", strerror(errno));
-        goto error;
-    } else if (WIFSIGNALED(status)) {
-        error("Command killed by signal: %d", WTERMSIG(status));
-        goto error;
-    } else if (WEXITSTATUS(status) != 0) {
-        error("Command returned non-zero exit status: %d", WEXITSTATUS(status));
-        goto error;
-    }
+
+    auto unmount_fuse_file = mb::finally([]{
+        retry_unmount(TEMP_CACHE_MOUNT_FILE, 5);
+    });
 
     // Create mount directory
     mkdir(TEMP_CACHE_MOUNT_DIR, 0700);
@@ -768,76 +888,44 @@ static bool flash_csc()
         error("Failed to mount (%s) %s at %s: %s",
               TEMP_CACHE_MOUNT_FILE, "ext4", TEMP_CACHE_MOUNT_DIR,
               strerror(errno));
-        goto error_fuse_mounted;
+        return ExtractResult::Error;
     }
+
+    auto unmount_dir = mb::finally([]{
+        retry_unmount(TEMP_CACHE_MOUNT_DIR, 5);
+    });
 
     // Mount system
     if (!mount_system()) {
         error("Failed to mount system");
-        goto error_sparse_mounted;
+        return ExtractResult::Error;
     }
 
-    if (!flash_csc_zip()) {
-        error("Failed to flash CSC zip");
-        goto error_system_mounted;
-    }
+    auto unmount_system_dir = mb::finally([]{
+        umount_system();
+    });
 
-    if (!apply_multi_csc()) {
-        error("Failed to apply Multi-CSC");
-        goto error_system_mounted;
-    }
-
-    umount_system();
-
-    // Looping is necessary in Touchwiz, which sometimes fails to unmount the
-    // fuse mountpoint on the first try (kernel bug?)
-    static constexpr int max_attempts = 5;
-
-    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        bool success = true;
-
-        info("[Attempt %d/%d] Unmounting %s",
-             attempt, max_attempts, TEMP_CACHE_MOUNT_DIR);
-        if (!unmounted_dir) {
-            unmounted_dir = mb::util::umount(TEMP_CACHE_MOUNT_DIR);
-            if (!unmounted_dir) {
-                error("WARNING: Failed to unmount %s: %s",
-                      TEMP_CACHE_MOUNT_DIR, strerror(errno));
-                success = false;
-            }
+    if (access(TEMP_CSC_ZIP_FILE, R_OK) == 0) {
+        if (!flash_carrier_package_zip(TEMP_CSC_ZIP_FILE)) {
+            error("Failed to flash CSC zip");
+            return ExtractResult::Error;
         }
 
-        info("[Attempt %d/%d] Unmounting %s",
-             attempt, max_attempts, TEMP_CACHE_MOUNT_FILE);
-        if (!unmounted_file) {
-            unmounted_file = mb::util::umount(TEMP_CACHE_MOUNT_FILE);
-            if (!unmounted_file) {
-                error("WARNING: Failed to unmount %s: %s",
-                      TEMP_CACHE_MOUNT_FILE, strerror(errno));
-                success = false;
-            }
+        if (!apply_multi_csc()) {
+            error("Failed to apply Multi-CSC");
+            return ExtractResult::Error;
         }
-
-        if (success) {
-            info("Successfully unmounted temporary cache image mountpoints");
-            break;
-        } else if (attempt != max_attempts) {
-            info("[Attempt %d/%d] Waiting 1 second before next attempt",
-                 attempt, max_attempts);
-            sleep(1);
+    } else if (access(TEMP_OMC_ZIP_FILE, R_OK) == 0) {
+        if (!flash_carrier_package_zip(TEMP_OMC_ZIP_FILE)) {
+            error("Failed to flash OMC zip");
+            return ExtractResult::Error;
         }
+    } else {
+        error("No CSC/OMC package found in the cache image");
+        return ExtractResult::Error;
     }
 
-    return true;
-
-error_system_mounted:
-    umount_system();
-error_sparse_mounted:
-    mb::util::umount(TEMP_CACHE_MOUNT_DIR);
-error_fuse_mounted:
-    umount(TEMP_CACHE_MOUNT_FILE);
-error:
-    return false;
+    return ExtractResult::Ok;
 }
 
 static bool flash_zip()
@@ -853,9 +941,7 @@ static bool flash_zip()
         return false;
     }
 
-    ui_print("------ EXPERIMENTAL ------");
     ui_print("Patched Odin image flasher");
-    ui_print("------ EXPERIMENTAL ------");
 
     // Load sales code from EFS partition
     if (!load_sales_code()) {
@@ -873,41 +959,58 @@ static bool flash_zip()
         return false;
     }
 
+    ExtractResult result;
+
     // Flash system.img.ext4
-#if DEBUG_SKIP_FLASH_SYSTEM
-    ui_print("[DEBUG] Skipping flashing of system image");
-#else
     ui_print("Flashing system image");
-    if (!extract_sparse_file(SYSTEM_SPARSE_FILE, system_block_dev.c_str())) {
+    result = extract_sparse_file(SYSTEM_SPARSE_FILE, system_block_dev.c_str());
+    switch (result) {
+    case ExtractResult::Error:
         ui_print("Failed to flash system image");
         return false;
+    case ExtractResult::Missing:
+        ui_print("[WARNING] System image not found");
+        break;
+    case ExtractResult::Ok:
+        ui_print("Successfully flashed system image");
+        break;
     }
-    ui_print("Successfully flashed system image");
-#endif
 
-    // Flash CSC from cache.img.ext4
-#if DEBUG_SKIP_FLASH_CSC
-    ui_print("[DEBUG] Skipping flashing of CSC");
-#else
-    ui_print("Flashing CSC from cache image");
-    if (!flash_csc()) {
-        ui_print("Failed to flash CSC");
+    // Kill RLC (remote lock control) as early as possible so the bootloader
+    // doesn't get relocked if the user decides to reboot into a partially
+    // flashed ROM
+    ui_print("Removing RLC (if present)");
+    if (!kill_rlc()) {
+        ui_print("--- WARNING WARNING WARNING ---");
+        ui_print("FAILED TO FULLY DISABLE RLC");
+        ui_print("YOUR BOOTLOADER MIGHT GET RELOCKED IF YOU REBOOT");
+        ui_print("--- WARNING WARNING WARNING ---");
         return false;
     }
-    ui_print("Successfully flashed CSC");
-#endif
+
+    // Flash carrier package from cache.img.ext4
+    ui_print("Flashing carrier package from cache image");
+    result = flash_carrier_package();
+    switch (result) {
+    case ExtractResult::Error:
+        ui_print("Failed to flash carrier package");
+        return false;
+    case ExtractResult::Missing:
+        ui_print("[WARNING] Cache image not found. Won't flash carrier package");
+        break;
+    case ExtractResult::Ok:
+        ui_print("Successfully flashed carrier package");
+        break;
+    }
 
     // Flash boot.img
-#if DEBUG_SKIP_FLASH_BOOT
-    ui_print("[DEBUG] Skipping flashing of boot image");
-#else
     ui_print("Flashing boot image");
-    if (!extract_raw_file(BOOT_IMAGE_FILE, boot_block_dev.c_str())) {
+    result = extract_raw_file(BOOT_IMAGE_FILE, boot_block_dev.c_str());
+    if (result != ExtractResult::Ok) {
         ui_print("Failed to flash boot image");
         return false;
     }
     ui_print("Successfully flashed boot image");
-#endif
 
     ui_print("---");
     ui_print("Flashing completed. The bootloader");
@@ -924,17 +1027,13 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    char *ptr;
-
-    interface = strtol(argv[1], &ptr, 10);
-    if (*ptr != '\0' || interface < 0) {
-        error("Invalid interface");
+    if (!mb::str_to_num(argv[1], 10, interface)) {
+        error("Invalid interface: '%s'", argv[1]);
         return EXIT_FAILURE;
     }
 
-    output_fd = strtol(argv[2], &ptr, 10);
-    if (*ptr != '\0' || output_fd < 0) {
-        error("Invalid output fd");
+    if (!mb::str_to_num(argv[2], 10, output_fd)) {
+        error("Invalid output fd: '%s'", argv[2]);
         return EXIT_FAILURE;
     }
 

@@ -1,48 +1,45 @@
 /*
- * Copyright (C) 2014-2016  Andrew Gunnerson <andrewgunnerson@gmail.com>
+ * Copyright (C) 2014-2018  Andrew Gunnerson <andrewgunnerson@gmail.com>
  *
- * This file is part of MultiBootPatcher
+ * This file is part of DualBootPatcher
  *
- * MultiBootPatcher is free software: you can redistribute it and/or modify
+ * DualBootPatcher is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * MultiBootPatcher is distributed in the hope that it will be useful,
+ * DualBootPatcher is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with MultiBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
+ * along with DualBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include <cstddef>
 
-namespace mb
-{
-namespace util
+namespace mb::util
 {
 
 /*!
  * \brief Raw command output callback
  *
- * \note \a data is always NULL-terminated. It is safe to pass \a data to
- * functions expecting a C-style string. However, \a size must be used for the
- * handling of binary data. \a data will not always contain a full line of
- * output.
+ * If \a data.empty(), then EOF has been reached.
  *
- * If \a size is 0, then EOF has been reached.
- *
- * \param data Bytes read from the stream
- * \param size Number of bytes read
+ * \param data Data read from the stream
  * \param error stderr if true, else stdout
- * \param userdata User-provided pointer
  */
-typedef void (*CmdRawCb)(const char *data, size_t size, bool error,
-                         void *userdata);
+using CmdRawCb = std::function<void(std::string_view data, bool error)>;
 
 /*!
  * \brief Line command output callback
@@ -56,22 +53,21 @@ typedef void (*CmdRawCb)(const char *data, size_t size, bool error,
  *
  * \param line Line that was read
  * \param error stderr if true, else stdout
- * \param userdata User-provided pointer
  */
-typedef void (*CmdLineCb)(const char *line, bool error, void *userdata);
+using CmdLineCb = std::function<void(std::string_view line, bool error)>;
 
 struct CommandCtxPriv;
 
 struct CommandCtx
 {
     /*! Path to executable */
-    const char *path = nullptr;
+    std::string path;
     /*! Argument list */
-    const char * const *argv = nullptr;
+    std::vector<std::string> argv;
     /*! Environment variable list */
-    const char * const *envp = nullptr;
+    std::optional<std::vector<std::string>> envp;
     /*! Directory to chroot before execution */
-    const char *chroot_dir = nullptr;
+    std::string chroot_dir;
     /*! Whether to redirect stdio fds */
     bool redirect_stdio = false;
 
@@ -82,24 +78,19 @@ struct CommandCtx
 
     // Private variables
 
-    CommandCtxPriv *_priv = nullptr;
+    std::unique_ptr<CommandCtxPriv> _priv;
 };
 
-bool command_start(struct CommandCtx *ctx);
-int command_wait(struct CommandCtx *ctx);
+bool command_start(CommandCtx &ctx);
+int command_wait(CommandCtx &ctx);
 
-bool command_raw_reader(struct CommandCtx *ctx, CmdRawCb cb, void *userdata);
-bool command_line_reader(struct CommandCtx *ctx, CmdLineCb cb, void *userdata);
+bool command_raw_reader(CommandCtx &ctx, const CmdRawCb &cb);
+bool command_line_reader(CommandCtx &ctx, const CmdLineCb &cb);
 
-void command_line_reader(const char *data, size_t size, bool error,
-                         void *userdata);
+int run_command(const std::string &path,
+                const std::vector<std::string> &argv,
+                const std::optional<std::vector<std::string>> &envp,
+                const std::string &chroot_dir,
+                const CmdLineCb &cb);
 
-int run_command(const char *path,
-                const char * const *argv,
-                const char * const *envp,
-                const char *chroot_dir,
-                CmdLineCb cb,
-                void *userdata);
-
-}
 }

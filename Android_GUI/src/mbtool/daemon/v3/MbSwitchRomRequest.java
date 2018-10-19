@@ -10,13 +10,16 @@ import com.google.flatbuffers.*;
 @SuppressWarnings("unused")
 public final class MbSwitchRomRequest extends Table {
   public static MbSwitchRomRequest getRootAsMbSwitchRomRequest(ByteBuffer _bb) { return getRootAsMbSwitchRomRequest(_bb, new MbSwitchRomRequest()); }
-  public static MbSwitchRomRequest getRootAsMbSwitchRomRequest(ByteBuffer _bb, MbSwitchRomRequest obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__init(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
-  public MbSwitchRomRequest __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; return this; }
+  public static MbSwitchRomRequest getRootAsMbSwitchRomRequest(ByteBuffer _bb, MbSwitchRomRequest obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__assign(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
+  public void __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; }
+  public MbSwitchRomRequest __assign(int _i, ByteBuffer _bb) { __init(_i, _bb); return this; }
 
   public String romId() { int o = __offset(4); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer romIdAsByteBuffer() { return __vector_as_bytebuffer(4, 1); }
+  public ByteBuffer romIdInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 4, 1); }
   public String bootBlockdev() { int o = __offset(6); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer bootBlockdevAsByteBuffer() { return __vector_as_bytebuffer(6, 1); }
+  public ByteBuffer bootBlockdevInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 6, 1); }
   public String blockdevBaseDirs(int j) { int o = __offset(8); return o != 0 ? __string(__vector(o) + j * 4) : null; }
   public int blockdevBaseDirsLength() { int o = __offset(8); return o != 0 ? __vector_len(o) : 0; }
   public boolean forceUpdateChecksums() { int o = __offset(10); return o != 0 ? 0!=bb.get(o + bb_pos) : false; }

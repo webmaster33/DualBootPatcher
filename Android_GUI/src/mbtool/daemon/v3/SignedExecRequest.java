@@ -10,17 +10,21 @@ import com.google.flatbuffers.*;
 @SuppressWarnings("unused")
 public final class SignedExecRequest extends Table {
   public static SignedExecRequest getRootAsSignedExecRequest(ByteBuffer _bb) { return getRootAsSignedExecRequest(_bb, new SignedExecRequest()); }
-  public static SignedExecRequest getRootAsSignedExecRequest(ByteBuffer _bb, SignedExecRequest obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__init(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
-  public SignedExecRequest __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; return this; }
+  public static SignedExecRequest getRootAsSignedExecRequest(ByteBuffer _bb, SignedExecRequest obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__assign(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
+  public void __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; }
+  public SignedExecRequest __assign(int _i, ByteBuffer _bb) { __init(_i, _bb); return this; }
 
   public String binaryPath() { int o = __offset(4); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer binaryPathAsByteBuffer() { return __vector_as_bytebuffer(4, 1); }
+  public ByteBuffer binaryPathInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 4, 1); }
   public String signaturePath() { int o = __offset(6); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer signaturePathAsByteBuffer() { return __vector_as_bytebuffer(6, 1); }
+  public ByteBuffer signaturePathInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 6, 1); }
   public String args(int j) { int o = __offset(8); return o != 0 ? __string(__vector(o) + j * 4) : null; }
   public int argsLength() { int o = __offset(8); return o != 0 ? __vector_len(o) : 0; }
   public String arg0() { int o = __offset(10); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer arg0AsByteBuffer() { return __vector_as_bytebuffer(10, 1); }
+  public ByteBuffer arg0InByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 10, 1); }
 
   public static int createSignedExecRequest(FlatBufferBuilder builder,
       int binary_pathOffset,

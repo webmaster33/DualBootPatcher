@@ -1,61 +1,61 @@
-if(${MBP_BUILD_TARGET} STREQUAL desktop
-        OR ${MBP_BUILD_TARGET} STREQUAL android-system)
-    set(BOOTIMGTOOL_SOURCES
-        bootimgtool.cpp
-    )
+set(variants)
 
-    add_executable(bootimgtool ${BOOTIMGTOOL_SOURCES})
+if(${MBP_BUILD_TARGET} STREQUAL android-system)
+    list(APPEND variants static)
+elseif(${MBP_BUILD_TARGET} STREQUAL desktop)
+    list(APPEND variants shared)
+endif()
 
-    if (${MBP_BUILD_TARGET} STREQUAL desktop)
-        target_compile_definitions(
-            bootimgtool
-            PRIVATE
-            -DMB_DYNAMIC_LINK
-        )
+foreach(variant ${variants})
+    set(bin_target bootimgtool-${variant})
 
-        target_link_libraries(
-            bootimgtool
-            mbp-shared
-            mbpio-static
-        )
-    else()
-        target_link_libraries(
-            bootimgtool
-            mbp-static
-            mbpio-static
-            mblog-static
-        )
+    # Build binary
+    add_executable(${bin_target} bootimgtool.cpp)
 
-        set_target_properties(
-            bootimgtool
-            PROPERTIES
-            LINK_FLAGS "-static"
-            LINK_SEARCH_START_STATIC ON
-        )
+    if(WIN32)
+        target_sources(${bin_target} PRIVATE bootimgtool.rc)
     endif()
 
     if(NOT MSVC)
-        set_target_properties(
-            bootimgtool
-            PROPERTIES
-            CXX_STANDARD 11
-            CXX_STANDARD_REQUIRED 1
+        target_compile_options(
+            ${bin_target}
+            PRIVATE
+            -Wno-format-nonliteral
         )
     endif()
 
-    # Set rpath for portable build
-    if (${MBP_PORTABLE})
-        set_target_properties(
-            bootimgtool
-            PROPERTIES
-            BUILD_WITH_INSTALL_RPATH OFF
-            INSTALL_RPATH "\$ORIGIN/lib"
-        )
+    # Set binary name
+    set_target_properties(${bin_target} PROPERTIES OUTPUT_NAME bootimgtool)
+
+    target_link_libraries(
+        ${bin_target}
+        interface.global.CXXVersion
+        interface.mbcommon.dynamic-link
+        mbbootimg-${variant}
+        mbpio-${variant}
+        mbcommon-${variant}
+        rapidjson
+    )
+
+    # Link dependencies
+    if(${variant} STREQUAL shared)
+        # Set rpath for portable build
+        if (${MBP_PORTABLE})
+            set_target_properties(
+                ${bin_target}
+                PROPERTIES
+                BUILD_WITH_INSTALL_RPATH OFF
+                INSTALL_RPATH "\$ORIGIN/lib"
+            )
+        endif()
+    elseif(${variant} STREQUAL static)
+        unix_link_executable_statically(${bin_target})
     endif()
 
+    # Install binary
     install(
-        TARGETS bootimgtool
+        TARGETS ${bin_target}
         RUNTIME DESTINATION "${BIN_INSTALL_DIR}/"
         COMPONENT Applications
     )
-endif()
+endforeach()

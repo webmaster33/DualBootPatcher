@@ -1,111 +1,82 @@
 /*
- * Copyright (C) 2015  Andrew Gunnerson <andrewgunnerson@gmail.com>
+ * Copyright (C) 2015-2018  Andrew Gunnerson <andrewgunnerson@gmail.com>
  *
- * This file is part of MultiBootPatcher
+ * This file is part of DualBootPatcher
  *
- * MultiBootPatcher is free software: you can redistribute it and/or modify
+ * DualBootPatcher is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * MultiBootPatcher is distributed in the hope that it will be useful,
+ * DualBootPatcher is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with MultiBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
+ * along with DualBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "mbpio/win32/delete.h"
 
 #include <windows.h>
 
-#include "mbpio/error.h"
-#include "mbpio/private/string.h"
-#include "mbpio/private/utf8.h"
-#include "mbpio/win32/error.h"
+#include <memory>
+#include <type_traits>
 
-namespace io
+#include "mbcommon/error_code.h"
+#include "mbcommon/locale.h"
+
+namespace mb::io::win32
 {
-namespace win32
-{
 
-class ScopedFindHandle {
-public:
-    ScopedFindHandle(HANDLE h) : handle(h)
-    {
-    }
+using ScopedFindHandle = std::unique_ptr<std::remove_pointer_t<HANDLE>, decltype(FindClose) *>;
 
-    ~ScopedFindHandle() {
-        FindClose(handle);
-    }
-
-private:
-    HANDLE handle;
-};
-
-static bool win32RecursiveDelete(const std::wstring &path)
+static oc::result<void> _win32_recursive_delete(const std::wstring &path)
 {
     std::wstring mask(path);
     mask += L"\\*";
 
-    WIN32_FIND_DATAW findData;
+    WIN32_FIND_DATAW find_data;
 
     // First, delete the contents of the directory, recursively for subdirectories
-    HANDLE searchHandle = FindFirstFileExW(
+    HANDLE _search_handle = FindFirstFileExW(
         mask.c_str(),           // lpFileName
         FindExInfoBasic,        // fInfoLevelId
-        &findData,              // lpFindFileData
+        &find_data,             // lpFindFileData
         FindExSearchNameMatch,  // fSearchOp
         nullptr,                // lpSearchFilter
         0                       // dwAdditionalFlags
     );
-    if (searchHandle == INVALID_HANDLE_VALUE) {
-        DWORD error = GetLastError();
-        if (error != ERROR_FILE_NOT_FOUND) {
-            setLastError(Error::PlatformError, priv::format(
-                    "%s: FindFirstFileExW() failed: %s",
-                    utf8::utf16ToUtf8(path).c_str(),
-                    errorToString(error).c_str()));
-            return false;
+    if (_search_handle == INVALID_HANDLE_VALUE) {
+        if (auto error = GetLastError(); error != ERROR_FILE_NOT_FOUND) {
+            return ec_from_win32(error);
         }
     } else {
-        ScopedFindHandle scope(searchHandle);
-        while (true) {
-            if (wcscmp(findData.cFileName, L".") != 0
-                    && wcscmp(findData.cFileName, L"..") != 0) {
-                bool isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                        || (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
-                std::wstring childPath(path);
-                childPath += L'\\';
-                childPath += findData.cFileName;
+        ScopedFindHandle search_handle(_search_handle, &FindClose);
 
-                if (isDirectory) {
-                    if (!win32RecursiveDelete(childPath)) {
-                        return false;
-                    }
+        while (true) {
+            if (wcscmp(find_data.cFileName, L".") != 0
+                    && wcscmp(find_data.cFileName, L"..") != 0) {
+                bool is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                        || (find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+                std::wstring child_path(path);
+                child_path += L'\\';
+                child_path += find_data.cFileName;
+
+                if (is_directory) {
+                    OUTCOME_TRYV(_win32_recursive_delete(child_path));
                 } else {
-                    if (!DeleteFileW(childPath.c_str())) {
-                        DWORD error = GetLastError();
-                        setLastError(Error::PlatformError, priv::format(
-                                "%s: DeleteFileW() failed: %s",
-                                utf8::utf16ToUtf8(childPath).c_str(),
-                                errorToString(error).c_str()));
-                        return false;
+                    if (!DeleteFileW(child_path.c_str())) {
+                        return ec_from_win32();
                     }
                 }
             }
 
             // Advance to the next file in the directory
-            if (!FindNextFileW(searchHandle, &findData)) {
-                DWORD error = GetLastError();
-                if (error != ERROR_NO_MORE_FILES) {
-                    setLastError(Error::PlatformError, priv::format(
-                            "%s: FindNextFileW() failed: %s",
-                            utf8::utf16ToUtf8(path).c_str(),
-                            errorToString(error).c_str()));
-                    return false;
+            if (!FindNextFileW(search_handle.get(), &find_data)) {
+                if (auto error = GetLastError(); error != ERROR_NO_MORE_FILES) {
+                    return ec_from_win32(error);
                 }
                 break;
             }
@@ -113,22 +84,17 @@ static bool win32RecursiveDelete(const std::wstring &path)
     }
 
     if (!RemoveDirectoryW(path.c_str())) {
-        DWORD error = GetLastError();
-        setLastError(Error::PlatformError, priv::format(
-                "%s: RemoveDirectoryW() failed: %s",
-                utf8::utf16ToUtf8(path).c_str(),
-                errorToString(error).c_str()));
-        return false;
+        return ec_from_win32();
     }
 
-    return true;
+    return oc::success();
 }
 
-bool deleteRecursively(const std::string &path)
+oc::result<void> delete_recursively(const std::string &path)
 {
-    std::wstring wPath = utf8::utf8ToUtf16(path);
-    return win32RecursiveDelete(wPath);
+    OUTCOME_TRY(w_path, mb::utf8_to_wcs(path));
+
+    return _win32_recursive_delete(w_path);
 }
 
-}
 }

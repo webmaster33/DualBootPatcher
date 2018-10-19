@@ -10,13 +10,16 @@ import com.google.flatbuffers.*;
 @SuppressWarnings("unused")
 public final class PathCopyRequest extends Table {
   public static PathCopyRequest getRootAsPathCopyRequest(ByteBuffer _bb) { return getRootAsPathCopyRequest(_bb, new PathCopyRequest()); }
-  public static PathCopyRequest getRootAsPathCopyRequest(ByteBuffer _bb, PathCopyRequest obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__init(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
-  public PathCopyRequest __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; return this; }
+  public static PathCopyRequest getRootAsPathCopyRequest(ByteBuffer _bb, PathCopyRequest obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__assign(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
+  public void __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; }
+  public PathCopyRequest __assign(int _i, ByteBuffer _bb) { __init(_i, _bb); return this; }
 
   public String source() { int o = __offset(4); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer sourceAsByteBuffer() { return __vector_as_bytebuffer(4, 1); }
+  public ByteBuffer sourceInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 4, 1); }
   public String target() { int o = __offset(6); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer targetAsByteBuffer() { return __vector_as_bytebuffer(6, 1); }
+  public ByteBuffer targetInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 6, 1); }
 
   public static int createPathCopyRequest(FlatBufferBuilder builder,
       int sourceOffset,

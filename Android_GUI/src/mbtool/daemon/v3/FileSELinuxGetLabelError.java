@@ -10,12 +10,14 @@ import com.google.flatbuffers.*;
 @SuppressWarnings("unused")
 public final class FileSELinuxGetLabelError extends Table {
   public static FileSELinuxGetLabelError getRootAsFileSELinuxGetLabelError(ByteBuffer _bb) { return getRootAsFileSELinuxGetLabelError(_bb, new FileSELinuxGetLabelError()); }
-  public static FileSELinuxGetLabelError getRootAsFileSELinuxGetLabelError(ByteBuffer _bb, FileSELinuxGetLabelError obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__init(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
-  public FileSELinuxGetLabelError __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; return this; }
+  public static FileSELinuxGetLabelError getRootAsFileSELinuxGetLabelError(ByteBuffer _bb, FileSELinuxGetLabelError obj) { _bb.order(ByteOrder.LITTLE_ENDIAN); return (obj.__assign(_bb.getInt(_bb.position()) + _bb.position(), _bb)); }
+  public void __init(int _i, ByteBuffer _bb) { bb_pos = _i; bb = _bb; }
+  public FileSELinuxGetLabelError __assign(int _i, ByteBuffer _bb) { __init(_i, _bb); return this; }
 
   public int errnoValue() { int o = __offset(4); return o != 0 ? bb.getInt(o + bb_pos) : 0; }
   public String msg() { int o = __offset(6); return o != 0 ? __string(o + bb_pos) : null; }
   public ByteBuffer msgAsByteBuffer() { return __vector_as_bytebuffer(6, 1); }
+  public ByteBuffer msgInByteBuffer(ByteBuffer _bb) { return __vector_in_bytebuffer(_bb, 6, 1); }
 
   public static int createFileSELinuxGetLabelError(FlatBufferBuilder builder,
       int errno_value,

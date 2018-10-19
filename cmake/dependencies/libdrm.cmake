@@ -1,6 +1,1 @@
-if(ANDROID)
-    set(MBP_LIBDRM_INCLUDES
-        ${THIRD_PARTY_LIBDRM_DIR}/${ANDROID_ABI}/include)
-    set(MBP_LIBDRM_LIBRARIES
-        ${THIRD_PARTY_LIBDRM_DIR}/${ANDROID_ABI}/lib/libdrm.a)
-endif()
+find_package(LibDrm REQUIRED)

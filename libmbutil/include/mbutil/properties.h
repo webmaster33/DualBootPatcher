@@ -1,86 +1,103 @@
 /*
- * Copyright (C) 2014-2015  Andrew Gunnerson <andrewgunnerson@gmail.com>
+ * Copyright (C) 2014-2018  Andrew Gunnerson <andrewgunnerson@gmail.com>
  *
- * This file is part of MultiBootPatcher
+ * This file is part of DualBootPatcher
  *
- * MultiBootPatcher is free software: you can redistribute it and/or modify
+ * DualBootPatcher is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * MultiBootPatcher is distributed in the hope that it will be useful,
+ * DualBootPatcher is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with MultiBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
+ * along with DualBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
+#include <functional>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
-#include "mbutil/integer.h"
-#include "mbutil/external/system_properties.h"
+#include "mbcommon/integer.h"
 
-namespace mb
-{
-namespace util
+
+namespace mb::util
 {
 
-// Wrappers around the libc functions that automatically dlopen libc.so
-int libc_system_property_get(const char *name, char *value);
-int libc_system_property_set(const char *key, const char *value);
-const prop_info *libc_system_property_find(const char *name);
-int libc_system_property_read(const prop_info *pi, char *name, char *value);
-const prop_info *libc_system_property_find_nth(unsigned n);
-int libc_system_property_foreach(
-        void (*propfn)(const prop_info *pi, void *cookie),
-        void *cookie);
-
-int property_get(const char *key, char *value_out, const char *default_value);
-int property_set(const char *key, const char *value);
-
-bool property_get_bool(const char *key, bool default_value);
-
-template<typename SIntType>
-inline SIntType property_get_snum(const char *key, SIntType default_value)
+enum class PropertyIterAction
 {
-    char buf[PROP_VALUE_MAX];
-    SIntType value;
+    Continue,
+    Stop,
+};
 
-    int n = property_get(key, buf, "");
-    return (n >= 0 && str_to_snum(buf, 10, value))
-            ? value : default_value;
+using PropertyIterCb = PropertyIterAction(std::string_view key,
+                                          std::string_view value);
+using PropertiesMap = std::unordered_map<std::string, std::string>;
+
+// Helper functions
+
+std::optional<std::string> property_get(const std::string &key);
+std::string property_get_string(const std::string &key,
+                                const std::string &default_value);
+bool property_get_bool(const std::string &key, bool default_value);
+
+template<typename IntType>
+inline IntType property_get_num(const std::string &key, IntType default_value)
+{
+    if (auto value = property_get(key)) {
+        IntType result;
+        if (str_to_num(value->c_str(), 10, result)) {
+            return result;
+        }
+    }
+
+    return default_value;
 }
 
-template<typename UIntType>
-inline UIntType property_get_unum(const char *key, UIntType default_value)
+bool property_set(const std::string &key, const std::string &value);
+bool property_set_direct(const std::string &key, const std::string &value);
+
+bool property_iter(const std::function<PropertyIterCb> &fn);
+
+std::optional<PropertiesMap> property_get_all();
+
+// Properties file functions
+
+std::optional<std::string> property_file_get(const std::string &path,
+                                             const std::string &key);
+std::string property_file_get_string(const std::string &path,
+                                     const std::string &key,
+                                     const std::string &default_value);
+bool property_file_get_bool(const std::string &path, const std::string &key,
+                            bool default_value);
+
+template<typename IntType>
+inline IntType property_file_get_num(const std::string &path,
+                                     const std::string &key,
+                                     IntType default_value)
 {
-    char buf[PROP_VALUE_MAX];
-    UIntType value;
+    if (auto value = property_file_get(path, key)) {
+        IntType result;
+        if (str_to_num(value->c_str(), 10, result)) {
+            return result;
+        }
+    }
 
-    int n = property_get(key, buf, "");
-    return (n >= 0 && str_to_unum(buf, 10, value))
-            ? value : default_value;
+    return default_value;
 }
 
-typedef void (*property_list_cb)(const char *key, const char *value,
-                                 void *cookie);
+bool property_file_iter(const std::string &path, std::string_view filter,
+                        const std::function<PropertyIterCb> &fn);
 
-int property_list(property_list_cb propfn, void *cookie);
+std::optional<PropertiesMap> property_file_get_all(const std::string &path);
 
-bool get_all_properties(std::unordered_map<std::string, std::string> *map);
-bool file_get_property(const std::string &path,
-                       const std::string &key,
-                       std::string *out,
-                       const std::string &default_value);
-bool file_get_all_properties(const std::string &path,
-                             std::unordered_map<std::string, std::string> *map);
-bool file_write_properties(const std::string &path,
-                           const std::unordered_map<std::string, std::string> &map);
+bool property_file_write_all(const std::string &path, const PropertiesMap &map);
 
-}
 }

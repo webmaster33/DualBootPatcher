@@ -1,13 +1,11 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.8)
 
-# Add custom module path for AndroidCompat platform on CMake 3.7
-if(NOT CMAKE_VERSION VERSION_LESS 3.7)
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cmake-3.7")
-endif()
+# Add our custom module path
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules")
 
 project(DualBootPatcher CXX C ASM)
 set(MBP_VERSION_MAJOR 9)
-set(MBP_VERSION_MINOR 1)
+set(MBP_VERSION_MINOR 3)
 set(MBP_VERSION_PATCH 0)
 set(MBP_VERSION "${MBP_VERSION_MAJOR}.${MBP_VERSION_MINOR}.${MBP_VERSION_PATCH}")
 
@@ -47,33 +45,21 @@ if(NOT ${MBP_SYSTEM_BUILD_TYPE} STREQUAL release
     message(FATAL_ERROR "Invalid system build type: ${MBP_SYSTEM_BUILD_TYPE}")
 endif()
 
-# Require at least Android NDK r11
+# Android NDK
 if(${MBP_BUILD_TARGET} STREQUAL android-app
         OR ${MBP_BUILD_TARGET} STREQUAL android-system)
-    # r13 bug: ANDROID_NDK_RELEASE has newline at the end
-    string(REGEX REPLACE "^r(.+)[\r\n]+$" "\\1" ndk_release "${ANDROID_NDK_RELEASE}")
-    set(ndk_min_version 130.0)
-    set(ndk_max_version 132.0)
-
     # FIXME: Due to https://github.com/android-ndk/ndk/issues/222, we need a
     # custom toolchain file. Since we can't guarantee that the custom toolchain
     # file will work with newer versions of the NDK, we'll depend on an exact
     # version.
     set(ndk_version_whitelist
-        130.3315539
-        131.3345770
+        r17.0.4754217
     )
 
-    if(DEFINED ndk_version_whitelist
-            AND NOT ndk_release IN_LIST ndk_version_whitelist)
+    if(NOT ANDROID_NDK_RELEASE IN_LIST ndk_version_whitelist)
         message(FATAL_ERROR
                 "Requires NDK version in list: ${ndk_version_whitelist}"
-                " (detected: ${ndk_release})")
-    elseif(ndk_release VERSION_LESS ndk_min_version
-            OR NOT ndk_release VERSION_LESS ndk_max_version)
-        message(FATAL_ERROR
-                "Requires ${ndk_min_version} <= NDK version < ${ndk_max_version}"
-                " (detected: ${ndk_release})")
+                " (detected: ${ANDROID_NDK_RELEASE})")
     endif()
 endif()
 
@@ -128,27 +114,33 @@ endif()
 # - MBP_TOP_LEVEL_BUILD: Whether this is a parent CMake build
 # - MBP_INTERNAL_BUILD: Whether this is a recursive CMake build
 # - MBP_TARGET_CONFIG_FILE: Config file for the current build target
+# - MBP_TARGET_HAS_BUILDS: Whether this target builds anything
 
 if(${MBP_BUILD_TARGET} STREQUAL android)
     set(MBP_TARGET_CONFIG_FILE cmake/ConfigAndroid.cmake)
     set(MBP_TOP_LEVEL_BUILD TRUE)
     set(MBP_INTERNAL_BUILD FALSE)
+    set(MBP_TARGET_HAS_BUILDS FALSE)
 elseif(${MBP_BUILD_TARGET} STREQUAL desktop)
     set(MBP_TARGET_CONFIG_FILE cmake/ConfigDesktop.cmake)
     set(MBP_TOP_LEVEL_BUILD TRUE)
     set(MBP_INTERNAL_BUILD FALSE)
+    set(MBP_TARGET_HAS_BUILDS TRUE)
 elseif(${MBP_BUILD_TARGET} STREQUAL android-app)
     set(MBP_TARGET_CONFIG_FILE cmake/ConfigAndroidApp.cmake)
     set(MBP_TOP_LEVEL_BUILD FALSE)
     set(MBP_INTERNAL_BUILD TRUE)
+    set(MBP_TARGET_HAS_BUILDS TRUE)
 elseif(${MBP_BUILD_TARGET} STREQUAL android-system)
     set(MBP_TARGET_CONFIG_FILE cmake/ConfigAndroidSystem.cmake)
     set(MBP_TOP_LEVEL_BUILD FALSE)
     set(MBP_INTERNAL_BUILD TRUE)
+    set(MBP_TARGET_HAS_BUILDS TRUE)
 elseif(${MBP_BUILD_TARGET} STREQUAL hosttools)
     set(MBP_TARGET_CONFIG_FILE cmake/ConfigHostTools.cmake)
     set(MBP_TOP_LEVEL_BUILD FALSE)
     set(MBP_INTERNAL_BUILD TRUE)
+    set(MBP_TARGET_HAS_BUILDS TRUE)
 endif()
 
 # Screw Ubuntu's multiarch. FIND_LIBRARY_USE_LIB64_PATHS is disabled when
@@ -167,6 +159,12 @@ include(cmake/ConfigSigning.cmake)
 # Build target config
 include(${MBP_TARGET_CONFIG_FILE})
 
+# Implicit system include directories
+include(cmake/ImplicitIncludeDirs.cmake)
+
+# Helper functions to backup/restore variables
+include(cmake/VariableBackup.cmake)
+
 # Compile and link flags
 include(cmake/CompilerFlags.cmake)
 
@@ -176,32 +174,19 @@ add_subdirectory(thirdparty)
 # Dependencies
 include(cmake/Dependencies.cmake)
 
-set(MBP_GLOBAL_INCLUDE_DIRS
-    libmbcommon/include
-    libmbdevice/include
-    libmblog/include
-    libmbpio/include
-    libmbp/include
-    libmbsign/include
-    libmbsparse/include
-    libmbutil/include
-)
-
-include_directories(${MBP_GLOBAL_INCLUDE_DIRS})
-
 add_subdirectory(hosttools)
 add_subdirectory(libmbcommon)
+add_subdirectory(libmbbootimg)
 add_subdirectory(libmbdevice)
 add_subdirectory(libmblog)
 add_subdirectory(libmbpio)
-add_subdirectory(libmbp)
+add_subdirectory(libmbpatcher)
 add_subdirectory(libmbsign)
 add_subdirectory(libmbsparse)
 add_subdirectory(libmbutil)
 add_subdirectory(data)
 add_subdirectory(mbtool)
 add_subdirectory(mbbootui)
-add_subdirectory(cryptfstool)
 add_subdirectory(odinupdater)
 add_subdirectory(misc)
 add_subdirectory(libmiscstuff-jni)

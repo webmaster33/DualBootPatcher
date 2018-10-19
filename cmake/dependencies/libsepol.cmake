@@ -1,6 +1,1 @@
-if(ANDROID)
-    set(MBP_LIBSEPOL_INCLUDES
-        ${THIRD_PARTY_LIBSEPOL_DIR}/${ANDROID_ABI}/include)
-    set(MBP_LIBSEPOL_LIBRARIES
-        ${THIRD_PARTY_LIBSEPOL_DIR}/${ANDROID_ABI}/lib/libsepol.a)
-endif()
+find_package(LibSepol REQUIRED)

@@ -1,6 +1,27 @@
+/*
+ * Copyright (C) 2016-2017  Andrew Gunnerson <andrewgunnerson@gmail.com>
+ *
+ * This file is part of DualBootPatcher
+ *
+ * DualBootPatcher is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * DualBootPatcher is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with DualBootPatcher.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #define FUSE_USE_VERSION 26
 
+#include <mutex>
 #include <new>
+#include <optional>
 
 #include <cerrno>
 #include <cinttypes>
@@ -9,17 +30,38 @@
 #include <cstring>
 
 #include <fcntl.h>
-#include <pthread.h>
 #include <unistd.h>
 
+#ifdef __clang__
+#  pragma GCC diagnostic push
+#  if __has_warning("-Wdocumentation")
+#    pragma GCC diagnostic ignored "-Wdocumentation"
+#  endif
+#endif
+
 // fuse
+// We have to define _FILE_OFFSET_BITS because <fuse/fuse_common.h> requires it.
+// However, since it's no longer a no-op in NDK r15c and newer, we can't define
+// it globally. Bionic in API <24 doesn't support _FILE_OFFSET_BITS.
+// See: https://github.com/android-ndk/ndk/issues/480
+#ifdef __ANDROID__
+#  define _FILE_OFFSET_BITS 64
+#endif
 #include <fuse/fuse.h>
+#ifdef __ANDROID__
+#  undef _FILE_OFFSET_BITS
+#endif
+
+#ifdef __clang__
+#  pragma GCC diagnostic pop
+#endif
+
+// libmbcommon
+#include "mbcommon/file.h"
+#include "mbcommon/file/standard.h"
 
 // libmbsparse
 #include "mbsparse/sparse.h"
-
-// libmbpio
-#include "mbpio/file.h"
 
 #ifdef __ANDROID__
 #define OFF_T loff_t
@@ -30,95 +72,27 @@
 static char source_fd_path[50];
 static uint64_t sparse_size;
 
-struct context {
-    SparseCtx *sctx;
-    io::File file;
-    pthread_mutex_t mutex;
+struct context
+{
+    mb::StandardFile source_file;
+    mb::sparse::SparseFile sparse_file;
+    std::mutex mutex;
 };
 
-/*!
- * \brief Open callback for sparseOpen()
- */
-static bool cb_open(void *userData)
+static std::optional<int> extract_errno(std::error_code ec)
 {
-    context *ctx = static_cast<context *>(userData);
-    if (!ctx->file.open(source_fd_path, io::File::OpenRead)) {
-        fprintf(stderr, "%s: Failed to open: %s\n",
-                source_fd_path, ctx->file.errorString().c_str());
-        return false;
+    if (ec.category() == std::generic_category()
+            || ec.category() == std::system_category()) {
+        return ec.value();
     }
-    return true;
-}
 
-/*!
- * \brief Close callback for sparseOpen()
- */
-static bool cb_close(void *userData)
-{
-    context *ctx = static_cast<context *>(userData);
-    if (!ctx->file.close()) {
-        fprintf(stderr, "%s: Failed to close: %s\n",
-                source_fd_path, ctx->file.errorString().c_str());
-        return false;
-    }
-    return true;
-}
-
-/*!
- * \brief Read callback for sparseOpen()
- */
-static bool cb_read(void *buf, uint64_t size, uint64_t *bytesRead,
-                    void *userData)
-{
-    context *ctx = static_cast<context *>(userData);
-    uint64_t total = 0;
-    while (size > 0) {
-        uint64_t partial;
-        if (!ctx->file.read(buf, size, &partial)) {
-            fprintf(stderr, "%s: Failed to read: %s\n",
-                    source_fd_path, ctx->file.errorString().c_str());
-            return false;
-        }
-        size -= partial;
-        total += partial;
-        buf = (char *) buf + partial;
-    }
-    *bytesRead = total;
-    return true;
-}
-
-/*!
- * \brief Seek callback for sparseOpen()
- */
-static bool cb_seek(int64_t offset, int whence, void *userData)
-{
-    context *ctx = static_cast<context *>(userData);
-    int ioWhence;
-    switch (whence) {
-    case SEEK_SET:
-        ioWhence = io::File::SeekBegin;
-        break;
-    case SEEK_CUR:
-        ioWhence = io::File::SeekCurrent;
-        break;
-    case SEEK_END:
-        ioWhence = io::File::SeekEnd;
-        break;
-    default:
-        return false;
-    }
-    if (!ctx->file.seek(offset, ioWhence)) {
-        fprintf(stderr, "%s: Failed to seek: %s\n",
-                source_fd_path, ctx->file.errorString().c_str());
-        return false;
-    }
-    return true;
+    return {};
 }
 
 /*!
  * \brief Open callback for fuse
  */
-static int fuse_open(const char *path, struct fuse_file_info *fi)
+static int fuse_open(const char *path, fuse_file_info *fi)
 {
     (void) path;
 
@@ -126,25 +100,29 @@ static int fuse_open(const char *path, struct fuse_file_info *fi)
         return -EROFS;
     }
 
-    struct context *ctx = new(std::nothrow) context();
+    context *ctx = new(std::nothrow) context();
     if (!ctx) {
         return -ENOMEM;
     }
 
-    ctx->sctx = sparseCtxNew();
-    if (!ctx->sctx) {
+    auto ret = ctx->source_file.open(source_fd_path,
+                                     mb::FileOpenMode::ReadOnly);
+    if (!ret) {
+        fprintf(stderr, "%s: Failed to open file: %s\n",
+                source_fd_path, ret.error().message().c_str());
         delete ctx;
-        return -ENOMEM;
+        return -extract_errno(ret.error()).value_or(EIO);
     }
 
-    if (!sparseOpen(ctx->sctx, &cb_open, &cb_close, &cb_read, &cb_seek, nullptr,
-                    ctx)) {
-        sparseCtxFree(ctx->sctx);
+    ret = ctx->sparse_file.open(&ctx->source_file);
+    if (!ret) {
+        fprintf(stderr, "%s: Failed to open sparse file: %s\n",
+                source_fd_path, ret.error().message().c_str());
         delete ctx;
-        return -EIO;
+        return -extract_errno(ret.error()).value_or(EIO);
     }
 
-    fi->fh = (uint64_t) ctx;
+    fi->fh = reinterpret_cast<uint64_t>(ctx);
 
     return 0;
 }
@@ -152,13 +130,11 @@ static int fuse_open(const char *path, struct fuse_file_info *fi)
 /*!
  * \brief Release callback for fuse
  */
-static int fuse_release(const char *path, struct fuse_file_info *fi)
+static int fuse_release(const char *path, fuse_file_info *fi)
 {
     (void) path;
 
-    struct context *ctx = (struct context *) fi->fh;
-    sparseCtxFree(ctx->sctx);
-    delete ctx;
+    delete reinterpret_cast<context *>(fi->fh);
 
     return 0;
 }
@@ -169,37 +145,35 @@ static int fuse_release(const char *path, struct fuse_file_info *fi)
  * \warning Bad stuff will happen if \a ctx->mutex is not locked when this
  *          function is called
  */
-static int fuse_read_locked(struct context *ctx, char *buf, size_t size,
+static int fuse_read_locked(context *ctx, char *buf, size_t size,
                             OFF_T offset)
 {
     // Seek to position
-    if (!sparseSeek(ctx->sctx, offset, SEEK_SET)) {
-        return -1;
+    auto new_offset = ctx->sparse_file.seek(offset, SEEK_SET);
+    if (!new_offset) {
+        return -extract_errno(new_offset.error()).value_or(EIO);
     }
 
-    uint64_t bytes_read;
-    if (!sparseRead(ctx->sctx, buf, size, &bytes_read)) {
-        return -1;
+    auto n = ctx->sparse_file.read(buf, size);
+    if (!n) {
+        return -extract_errno(n.error()).value_or(EIO);
     }
 
-    return bytes_read;
+    return static_cast<int>(n.value());
 }
 
 /*!
  * \brief Read callback for fuse
  */
 static int fuse_read(const char *path, char *buf, size_t size, OFF_T offset,
-                     struct fuse_file_info *fi)
+                     fuse_file_info *fi)
 {
     (void) path;
 
-    struct context *ctx = (struct context *) fi->fh;
+    context *ctx = reinterpret_cast<context *>(fi->fh);
 
-    pthread_mutex_lock(&ctx->mutex);
-    int ret = fuse_read_locked(ctx, buf, size, offset);
-    pthread_mutex_unlock(&ctx->mutex);
-
-    return ret;
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    return fuse_read_locked(ctx, buf, size, offset);
 }
 
 /*!
@@ -210,7 +184,7 @@ static int fuse_getattr(const char *path, struct stat *stbuf)
     (void) path;
 
     stbuf->st_mode = S_IFREG | 0444;
-    stbuf->st_size = sparse_size;
+    stbuf->st_size = static_cast<OFF_T>(sparse_size);
 
     return 0;
 }
@@ -220,32 +194,25 @@ static int fuse_getattr(const char *path, struct stat *stbuf)
  */
 static int get_sparse_file_size()
 {
-    struct context *ctx = new(std::nothrow) context();
-    if (!ctx) {
-        return -ENOMEM;
+    mb::StandardFile source_file;
+    mb::sparse::SparseFile sparse_file;
+
+    auto ret = source_file.open(source_fd_path, mb::FileOpenMode::ReadOnly);
+    if (!ret) {
+        fprintf(stderr, "%s: Failed to open file: %s\n",
+                source_fd_path, ret.error().message().c_str());
+        return -extract_errno(ret.error()).value_or(EIO);
     }
 
-    ctx->sctx = sparseCtxNew();
-    if (!ctx->sctx) {
-        delete ctx;
-        return -ENOMEM;
+    ret = sparse_file.open(&source_file);
+    if (!ret) {
+        fprintf(stderr, "%s: Failed to open sparse file: %s\n",
+                source_fd_path, ret.error().message().c_str());
+        return -extract_errno(ret.error()).value_or(EIO);
     }
 
-    if (!sparseOpen(ctx->sctx, &cb_open, &cb_close, &cb_read, &cb_seek, nullptr,
-                    ctx)) {
-        sparseCtxFree(ctx->sctx);
-        delete ctx;
-        return -EIO;
-    }
+    sparse_size = sparse_file.size();
 
-    if (!sparseSize(ctx->sctx, &sparse_size)) {
-        sparseCtxFree(ctx->sctx);
-        delete ctx;
-        return -EIO;
-    }
-
-    sparseCtxFree(ctx->sctx);
-    delete ctx;
     return 0;
 }
 
@@ -261,7 +228,7 @@ enum
     KEY_HELP
 };
 
-static struct fuse_opt fuse_opts[] =
+static fuse_opt fuse_opts[] =
 {
     FUSE_OPT_KEY("-h",     KEY_HELP),
     FUSE_OPT_KEY("--help", KEY_HELP),
@@ -281,9 +248,9 @@ static void usage(FILE *stream, const char *progname)
 }
 
 static int fuse_opt_proc(void *data, const char *arg, int key,
-                         struct fuse_args *outargs)
+                         fuse_args *outargs)
 {
-    struct arg_ctx *ctx = static_cast<struct arg_ctx *>(data);
+    arg_ctx *ctx = static_cast<arg_ctx *>(data);
 
     switch (key) {
     case FUSE_OPT_KEY_NONOPT:
@@ -307,8 +274,8 @@ static int fuse_opt_proc(void *data, const char *arg, int key,
 
 int main(int argc, char *argv[])
 {
-    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-    struct arg_ctx arg_ctx;
+    fuse_args args = FUSE_ARGS_INIT(argc, argv);
+    arg_ctx arg_ctx;
 
     if (fuse_opt_parse(&args, &arg_ctx, fuse_opts, fuse_opt_proc) == -1) {
         return EXIT_FAILURE;
@@ -326,7 +293,7 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
-        fd = open(arg_ctx.source_file, O_RDONLY);
+        fd = open(arg_ctx.source_file, O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             fprintf(stderr, "%s: Failed to open: %s\n",
                     arg_ctx.source_file, strerror(errno));
@@ -341,8 +308,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    struct fuse_operations fuse_oper;
-    memset(&fuse_oper, 0, sizeof(fuse_oper));
+    fuse_operations fuse_oper = {};
     fuse_oper.getattr = fuse_getattr;
     fuse_oper.open    = fuse_open;
     fuse_oper.read    = fuse_read;
